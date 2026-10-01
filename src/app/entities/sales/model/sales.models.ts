@@ -1,19 +1,27 @@
 export type CurrencyCode = 'USD' | 'VES' | 'EUR';
 
+declare const salesOrderIdBrand: unique symbol;
+declare const deliveryIdBrand: unique symbol;
+declare const productIdBrand: unique symbol;
+
+export type SalesOrderId = string & { readonly [salesOrderIdBrand]: 'SalesOrderId' };
+export type DeliveryId = string & { readonly [deliveryIdBrand]: 'DeliveryId' };
+export type ProductId = string & { readonly [productIdBrand]: 'ProductId' };
+
 export type SalesOrderStatus = 'draft' | 'confirmed' | 'completed' | 'cancelled';
 export type DeliveryStatus = 'pending' | 'validated' | 'cancelled';
 export type InvoiceStatus = 'draft' | 'published' | 'partial' | 'paid' | 'voided';
 export type PaymentStatus = 'confirmed' | 'voided';
 
 export interface DocumentLine {
-  productId: string;
+  productId: ProductId;
   description: string;
   quantity: number;
   unitPrice: number;
 }
 
 export interface SalesOrder {
-  id: string;
+  id: SalesOrderId;
   reference: string;
   customerName: string;
   status: SalesOrderStatus;
@@ -23,9 +31,9 @@ export interface SalesOrder {
 }
 
 export interface Delivery {
-  id: string;
+  id: DeliveryId;
   reference: string;
-  orderId: string;
+  orderId: SalesOrderId;
   orderReference: string;
   status: DeliveryStatus;
   lines: DocumentLine[];
@@ -35,7 +43,7 @@ export interface Delivery {
 export interface Invoice {
   id: string;
   reference: string;
-  orderId: string;
+  orderId: SalesOrderId;
   orderReference: string;
   status: InvoiceStatus;
   currency: CurrencyCode;

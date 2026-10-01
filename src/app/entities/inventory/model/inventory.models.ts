@@ -1,5 +1,7 @@
+import { ProductId } from '../../sales/model/sales.models';
+
 export interface InventoryItem {
-  id: string;
+  id: ProductId;
   sku: string;
   name: string;
   availableQuantity: number;

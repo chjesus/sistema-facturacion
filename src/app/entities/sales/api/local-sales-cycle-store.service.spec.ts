@@ -112,7 +112,7 @@ describe('LocalSalesCycleStore', () => {
     expect(store.invoices()).toHaveLength(1);
   });
 
-  it('enforces invoice transitions and reserves settlement states for payments', () => {
+  it('enforces invoice transitions before payments settle an invoice', () => {
     const product = store.inventory()[0];
     const order = store.createSalesOrder({
       customerName: 'Acme',
@@ -123,14 +123,10 @@ describe('LocalSalesCycleStore', () => {
     store.validateDelivery(store.deliveries()[0].id);
     const invoice = store.createInvoiceFromOrder(order.id)!;
 
-    store.setInvoicePaymentStatus(invoice.id, 'paid');
-    expect(store.invoices()[0].status).toBe('draft');
     store.publishInvoice(invoice.id);
-    store.setInvoicePaymentStatus(invoice.id, 'partial');
-    store.setInvoicePaymentStatus(invoice.id, 'paid');
     store.voidInvoice(invoice.id);
 
-    expect(store.invoices()[0].status).toBe('paid');
+    expect(store.invoices()[0].status).toBe('voided');
   });
 
   it('voids a draft invoice and makes its quantities eligible again', () => {
@@ -149,4 +145,82 @@ describe('LocalSalesCycleStore', () => {
     expect(store.invoices()[0].status).toBe('voided');
     expect(store.invoiceEligibility(order.id)?.lines[0].quantity).toBe(1);
   });
+
+  it('settles an invoice partially and then in full', () => {
+    const invoice = publishedInvoice('USD', 100);
+
+    const firstPayment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 40 })!;
+    store.confirmPayment(firstPayment.id);
+    expect(store.invoices()[0].status).toBe('partial');
+    expect(store.invoiceSettledTotal(invoice.id)).toBe(40);
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(60);
+
+    const finalPayment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 60 })!;
+    store.confirmPayment(finalPayment.id);
+    expect(store.invoices()[0].status).toBe('paid');
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(0);
+  });
+
+  it('converts a payment into the invoice currency using the latest local rate', () => {
+    const invoice = publishedInvoice('USD', 100);
+
+    const payment = store.createPayment({ invoiceId: invoice.id, currency: 'VES', amount: 38.5 })!;
+    store.confirmPayment(payment.id);
+
+    expect(store.payments()[0]).toMatchObject({ currency: 'VES', convertedAmount: 1, frozenRate: 38.5 });
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(99);
+  });
+
+  it('freezes the rate and its date when a payment is confirmed', () => {
+    const invoice = publishedInvoice('USD', 100);
+    const payment = store.createPayment({ invoiceId: invoice.id, currency: 'EUR', amount: 10 })!;
+    const expectedRate = store.latestRate('EUR')!;
+
+    store.confirmPayment(payment.id);
+
+    expect(store.payments()[0]).toMatchObject({
+      frozenRate: expectedRate.rateToUsd,
+      frozenRateDate: expectedRate.date,
+      convertedAmount: 10.87,
+    });
+  });
+
+  it('rejects a payment that exceeds the remaining invoice balance', () => {
+    const invoice = publishedInvoice('USD', 100);
+
+    expect(store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 101 })).toBeUndefined();
+    expect(store.payments()).toHaveLength(0);
+  });
+
+  it('voids a confirmed payment, restores the invoice balance, and retains its frozen rate', () => {
+    const invoice = publishedInvoice('USD', 100);
+    const payment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 100 })!;
+    store.confirmPayment(payment.id);
+    const confirmedPayment = store.payments()[0];
+
+    store.voidPayment(payment.id);
+
+    expect(store.payments()[0]).toMatchObject({
+      status: 'voided',
+      frozenRate: confirmedPayment.frozenRate,
+      frozenRateDate: confirmedPayment.frozenRateDate,
+      convertedAmount: confirmedPayment.convertedAmount,
+    });
+    expect(store.invoices()[0].status).toBe('published');
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(100);
+  });
+
+  function publishedInvoice(currency: 'USD' | 'VES' | 'EUR', unitPrice: number) {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency,
+      lines: [{ productId: product.id, description: product.name, quantity: 1, unitPrice }],
+    });
+    store.confirmSalesOrder(order.id);
+    store.validateDelivery(store.deliveries()[0].id);
+    const invoice = store.createInvoiceFromOrder(order.id)!;
+    store.publishInvoice(invoice.id);
+    return invoice;
+  }
 });

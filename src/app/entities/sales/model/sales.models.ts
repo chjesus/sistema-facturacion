@@ -13,7 +13,7 @@ export type ProductId = string & { readonly [productIdBrand]: 'ProductId' };
 export type SalesOrderStatus = 'draft' | 'confirmed' | 'completed' | 'cancelled';
 export type DeliveryStatus = 'pending' | 'validated' | 'cancelled';
 export type InvoiceStatus = 'draft' | 'published' | 'partial' | 'paid' | 'voided';
-export type PaymentStatus = 'confirmed' | 'voided';
+export type PaymentStatus = 'draft' | 'confirmed' | 'voided';
 
 export interface DocumentLine {
   productId: ProductId;
@@ -63,6 +63,8 @@ export interface Payment {
   status: PaymentStatus;
   currency: CurrencyCode;
   amount: number;
-  frozenRate: number;
+  convertedAmount?: number;
+  frozenRate?: number;
+  frozenRateDate?: string;
   confirmedAt?: string;
 }

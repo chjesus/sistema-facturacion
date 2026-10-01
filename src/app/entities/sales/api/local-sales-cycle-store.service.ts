@@ -43,6 +43,27 @@ export class LocalSalesCycleStore {
       .sort((a, b) => b.date.localeCompare(a.date))[0];
   }
 
+  invoiceTotal(invoice: Invoice): number {
+    return invoice.lines.reduce((total, line) => total + line.quantity * line.unitPrice, 0);
+  }
+
+  invoiceSettledTotal(invoiceId: InvoiceId): number {
+    return this.settledTotalForState(this.state(), invoiceId);
+  }
+
+  invoiceBalance(invoice: Invoice): number {
+    return this.roundAmount(this.invoiceTotal(invoice) - this.invoiceSettledTotal(invoice.id));
+  }
+
+  paymentPreview(invoice: Invoice, currency: CurrencyCode, amount: number): {
+    rate: ExchangeRate;
+    convertedAmount: number;
+  } | undefined {
+    const rate = this.latestRate(currency);
+    if (!rate || !Number.isFinite(amount) || amount <= 0) return undefined;
+    return { rate, convertedAmount: this.convertToInvoiceCurrency(amount, rate, invoice.currency) };
+  }
+
   invoiceEligibility(orderId: SalesOrderId): { lines: DocumentLine[]; deliveryIds: DeliveryId[]; deliveryReferences: string[] } | undefined {
     return this.invoiceEligibilityForState(this.state(), orderId);
   }
@@ -172,8 +193,64 @@ export class LocalSalesCycleStore {
     this.transitionInvoice(invoiceId, 'voided');
   }
 
-  setInvoicePaymentStatus(invoiceId: InvoiceId, status: Extract<InvoiceStatus, 'partial' | 'paid'>): void {
-    this.transitionInvoice(invoiceId, status);
+  createPayment(input: { invoiceId: InvoiceId; currency: CurrencyCode; amount: number }): Payment | undefined {
+    let payment: Payment | undefined;
+    this.updateState((state) => {
+      const invoice = state.invoices.find((candidate) => candidate.id === input.invoiceId);
+      const preview = invoice ? this.paymentPreviewForState(state, invoice, input.currency, input.amount) : undefined;
+      if (!invoice || !this.isPayableInvoice(invoice) || !preview || preview.convertedAmount > this.invoiceBalanceForState(state, invoice)) {
+        return state;
+      }
+
+      payment = {
+        id: `payment-${this.identifier()}`,
+        reference: this.reference('PAY'),
+        invoiceId: invoice.id,
+        invoiceReference: invoice.reference,
+        status: 'draft',
+        currency: input.currency,
+        amount: this.roundAmount(input.amount),
+      };
+      return { ...state, payments: [payment, ...state.payments] };
+    });
+    return payment;
+  }
+
+  confirmPayment(paymentId: string): void {
+    this.updateState((state) => {
+      const payment = state.payments.find((candidate) => candidate.id === paymentId);
+      const invoice = payment ? state.invoices.find((candidate) => candidate.id === payment.invoiceId) : undefined;
+      const preview = payment && invoice ? this.paymentPreviewForState(state, invoice, payment.currency, payment.amount) : undefined;
+      if (!payment || !invoice || payment.status !== 'draft' || !this.isPayableInvoice(invoice) || !preview || preview.convertedAmount > this.invoiceBalanceForState(state, invoice)) {
+        return state;
+      }
+
+      const confirmedPayment: Payment = {
+        ...payment,
+        status: 'confirmed',
+        convertedAmount: preview.convertedAmount,
+        frozenRate: preview.rate.rateToUsd,
+        frozenRateDate: preview.rate.date,
+        confirmedAt: new Date().toISOString(),
+      };
+      return this.withSettlementStatus({
+        ...state,
+        payments: state.payments.map((candidate) => candidate.id === paymentId ? confirmedPayment : candidate),
+      }, invoice.id);
+    });
+  }
+
+  voidPayment(paymentId: string): void {
+    this.updateState((state) => {
+      const payment = state.payments.find((candidate) => candidate.id === paymentId);
+      if (!payment || (payment.status !== 'draft' && payment.status !== 'confirmed')) return state;
+      return this.withSettlementStatus({
+        ...state,
+        payments: state.payments.map((candidate) =>
+          candidate.id === paymentId ? { ...candidate, status: 'voided' } : candidate,
+        ),
+      }, payment.invoiceId);
+    });
   }
 
   private updateState(update: (state: SalesCycleState) => SalesCycleState): void {
@@ -213,6 +290,61 @@ export class LocalSalesCycleStore {
     if (currentStatus === 'published') return targetStatus === 'partial' || targetStatus === 'paid' || targetStatus === 'voided';
     if (currentStatus === 'partial') return targetStatus === 'paid' || targetStatus === 'voided';
     return false;
+  }
+
+  private isPayableInvoice(invoice: Invoice): boolean {
+    return invoice.status === 'published' || invoice.status === 'partial';
+  }
+
+  private paymentPreviewForState(
+    state: SalesCycleState,
+    invoice: Invoice,
+    currency: CurrencyCode,
+    amount: number,
+  ): { rate: ExchangeRate; convertedAmount: number } | undefined {
+    const rate = state.exchangeRates
+      .filter((candidate) => candidate.currency === currency)
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
+    if (!rate || !Number.isFinite(amount) || amount <= 0) return undefined;
+    return { rate, convertedAmount: this.convertToInvoiceCurrency(amount, rate, invoice.currency, state) };
+  }
+
+  private convertToInvoiceCurrency(
+    amount: number,
+    paymentRate: ExchangeRate,
+    invoiceCurrency: CurrencyCode,
+    state = this.state(),
+  ): number {
+    const invoiceRate = state.exchangeRates
+      .filter((candidate) => candidate.currency === invoiceCurrency)
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
+    if (!invoiceRate) return 0;
+    return this.roundAmount((amount / paymentRate.rateToUsd) * invoiceRate.rateToUsd);
+  }
+
+  private settledTotalForState(state: SalesCycleState, invoiceId: InvoiceId): number {
+    return this.roundAmount(state.payments
+      .filter((payment) => payment.invoiceId === invoiceId && payment.status === 'confirmed')
+      .reduce((total, payment) => total + (payment.convertedAmount ?? 0), 0));
+  }
+
+  private invoiceBalanceForState(state: SalesCycleState, invoice: Invoice): number {
+    return this.roundAmount(this.invoiceTotal(invoice) - this.settledTotalForState(state, invoice.id));
+  }
+
+  private withSettlementStatus(state: SalesCycleState, invoiceId: InvoiceId): SalesCycleState {
+    const invoice = state.invoices.find((candidate) => candidate.id === invoiceId);
+    if (!invoice || invoice.status === 'draft' || invoice.status === 'voided') return state;
+    const balance = this.invoiceBalanceForState(state, invoice);
+    const status: InvoiceStatus = balance <= 0 ? 'paid' : balance < this.invoiceTotal(invoice) ? 'partial' : 'published';
+    return {
+      ...state,
+      invoices: state.invoices.map((candidate) => candidate.id === invoiceId ? { ...candidate, status } : candidate),
+    };
+  }
+
+  private roundAmount(amount: number): number {
+    return Math.round((amount + Number.EPSILON) * 100) / 100;
   }
 
   private invoiceEligibilityForState(

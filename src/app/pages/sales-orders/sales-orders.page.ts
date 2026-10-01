@@ -25,7 +25,12 @@ const pageStyles = `
       <section class="orders"><h2>Orders</h2>@for (order of store.salesOrders(); track order.id) { <article class="order"><div class="order-top"><div><div class="reference">{{ order.reference }}</div><h3>{{ order.customerName }}</h3></div><span class="status" [class]="order.status">{{ order.status }}</span></div><div class="order-meta"><span>{{ order.orderDate }}</span><span>{{ order.currency }}</span><span>{{ deliveryReference(order) }}</span></div><div class="line-list">@for (line of order.lines; track line.productId) { <div class="line"><span>{{ line.description }} × {{ line.quantity }} · {{ money(line.unitPrice, order.currency) }}</span><span class="quantities">Ordered {{ quantities(order, line).ordered }} · Delivered {{ quantities(order, line).delivered }} · Invoiced {{ quantities(order, line).invoiced }}</span><span>{{ money(lineTotals(line).total, order.currency) }}</span></div> }</div><div class="totals"><div class="total"><span>Subtotal</span><span>{{ money(totals(order).subtotal, order.currency) }}</span></div><div class="total"><span>VAT (16%)</span><span>{{ money(totals(order).vat, order.currency) }}</span></div><div class="total grand"><span>Total</span><span>{{ money(totals(order).total, order.currency) }}</span></div></div>@if (order.status !== 'draft') { <p class="note">Confirmed orders are immutable.</p> }<div class="actions">@if (order.status === 'draft') { <button type="button" (click)="confirmOrder(order)">Confirm order</button> }<button type="button" class="secondary" [disabled]="!invoiceEligible(order)" (click)="createInvoice(order)">Create invoice</button>@if (order.status === 'draft' || order.status === 'confirmed') { <button type="button" class="secondary danger" [disabled]="!canCancel(order)" (click)="cancelOrder(order)">Cancel order</button> }</div>@if (!canCancel(order) && (order.status === 'draft' || order.status === 'confirmed')) { <p class="note">Cancellation is blocked after a validated delivery or committed invoice.</p> }</article> } @empty { <div class="empty"><h3>No sales orders yet</h3><p>Create a draft order to begin the sales cycle.</p></div> }</section>
     </section>
   `,
-  styles: [pageStyles],
+  styles: [pageStyles, `
+    .line-form { grid-template-columns: minmax(14rem, 1fr) minmax(7rem, .45fr) max-content; }
+    .line-form > label { min-width: 0; }
+    .line-form > button { min-width: max-content; white-space: nowrap; }
+    @media (max-width: 640px) { .line-form { grid-template-columns: 1fr; } .line-form > button { justify-self: start; } }
+  `],
 })
 export class SalesOrdersPage {
   protected readonly store = inject(LocalSalesCycleStore);

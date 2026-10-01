@@ -51,16 +51,23 @@ describe('LocalSalesCycleStore', () => {
     expect(store.salesOrderTotals(order)).toEqual({ subtotal: 30.03, vat: 4.8, total: 34.83 });
   });
 
-  it('uses a zero price fallback for persisted inventory without a suggested price', () => {
+  it('migrates missing and zero prices for known persisted fixtures without changing custom products', () => {
     localStorage.setItem('sales-cycle-state-v1', JSON.stringify({
       salesOrders: [], deliveries: [], invoices: [], payments: [], exchangeRates: [],
-      inventory: [{ id: 'legacy-product', sku: 'LEG-001', name: 'Legacy Product', availableQuantity: 1, unit: 'units' }],
+      inventory: [
+        { id: 'desk-lamp', sku: 'LGT-001', name: 'Arc Desk Lamp', availableQuantity: 24, unit: 'units' },
+        { id: 'notebook', sku: 'OFF-014', name: 'Hardcover Notebook', availableQuantity: 80, unit: 'units', suggestedUnitPrice: 0 },
+        { id: 'chair', sku: 'FUR-020', name: 'Ergonomic Chair', availableQuantity: 12, unit: 'units', suggestedUnitPrice: 275 },
+        { id: 'legacy-product', sku: 'LEG-001', name: 'Legacy Product', availableQuantity: 1, unit: 'units' },
+        { id: 'custom-product', sku: 'CUS-001', name: 'Custom Product', availableQuantity: 1, unit: 'units', suggestedUnitPrice: 19.99 },
+      ],
     }));
     TestBed.resetTestingModule();
     TestBed.configureTestingModule({});
     const legacyStore = TestBed.inject(LocalSalesCycleStore);
 
-    expect(legacyStore.suggestedUnitPrice(legacyStore.inventory()[0].id)).toBe(0);
+    expect(legacyStore.inventory().map((item) => item.suggestedUnitPrice)).toEqual([49.95, 12.5, 275, 0, 19.99]);
+    expect(JSON.parse(localStorage.getItem('sales-cycle-state-v1') ?? '{}').inventory.map((item: { suggestedUnitPrice: number }) => item.suggestedUnitPrice)).toEqual([49.95, 12.5, 275, 0, 19.99]);
   });
 
   it('keeps confirmed orders immutable while creating exactly one pending delivery', () => {

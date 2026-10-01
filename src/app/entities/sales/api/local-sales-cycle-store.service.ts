@@ -27,6 +27,11 @@ interface SalesCycleState {
 }
 
 const STORAGE_KEY = 'sales-cycle-state-v1';
+const FIXTURE_PRICES = new Map<string, { sku: string; name: string; suggestedUnitPrice: number }>([
+  ['desk-lamp', { sku: 'LGT-001', name: 'Arc Desk Lamp', suggestedUnitPrice: 49.95 }],
+  ['notebook', { sku: 'OFF-014', name: 'Hardcover Notebook', suggestedUnitPrice: 12.5 }],
+  ['chair', { sku: 'FUR-020', name: 'Ergonomic Chair', suggestedUnitPrice: 275 }],
+]);
 
 @Injectable({ providedIn: 'root' })
 export class LocalSalesCycleStore {
@@ -454,14 +459,26 @@ export class LocalSalesCycleStore {
 
     try {
       const state = JSON.parse(stored) as SalesCycleState;
-      return {
+      const migratedState = {
         ...state,
-        inventory: state.inventory.map((item) => ({ ...item, suggestedUnitPrice: this.roundAmount(item.suggestedUnitPrice ?? 0) })),
+        inventory: state.inventory.map((item) => this.migrateFixturePrice(item)),
         salesOrders: state.salesOrders.map((order) => ({ ...order, orderDate: order.orderDate ?? order.createdAt.slice(0, 10) })),
       };
+      this.persist(migratedState);
+      return migratedState;
     } catch {
       return this.seedState();
     }
+  }
+
+  private migrateFixturePrice(item: InventoryItem): InventoryItem {
+    const fixture = FIXTURE_PRICES.get(item.id);
+    const isKnownFixture = fixture?.sku === item.sku && fixture.name === item.name;
+    const existingPrice = item.suggestedUnitPrice;
+    const suggestedUnitPrice = isKnownFixture && (existingPrice === undefined || !Number.isFinite(existingPrice) || existingPrice <= 0)
+      ? fixture.suggestedUnitPrice
+      : existingPrice ?? 0;
+    return { ...item, suggestedUnitPrice: this.roundAmount(suggestedUnitPrice) };
   }
 
   private seedState(): SalesCycleState {

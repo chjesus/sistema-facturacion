@@ -26,4 +26,15 @@ describe('SalesOrdersPage', () => {
     expect(invoiceButton.disabled).toBe(false);
     expect(fixture.nativeElement.textContent).toContain('Ordered 2 · Delivered 2 · Invoiced 0');
   });
+
+  it('shows the fixture suggested price and renders the line-entry grid controls', () => {
+    const fixture = TestBed.createComponent(SalesOrdersPage);
+    fixture.detectChanges();
+
+    const lineForm = fixture.nativeElement.querySelector('.line-form') as HTMLElement;
+    expect(fixture.nativeElement.textContent).toContain('Suggested price: $49.95');
+    expect(lineForm.querySelector('label:first-child select')).not.toBeNull();
+    expect(lineForm.querySelector('label:nth-child(2) input')).not.toBeNull();
+    expect(lineForm.querySelector('button')?.textContent?.trim()).toBe('Add line');
+  });
 });

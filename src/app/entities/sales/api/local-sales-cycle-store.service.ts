@@ -7,6 +7,8 @@ import {
   DeliveryId,
   DocumentLine,
   Invoice,
+  InvoiceId,
+  InvoiceStatus,
   Payment,
   ProductId,
   SalesOrder,
@@ -39,6 +41,10 @@ export class LocalSalesCycleStore {
     return this.exchangeRates()
       .filter((rate) => rate.currency === currency)
       .sort((a, b) => b.date.localeCompare(a.date))[0];
+  }
+
+  invoiceEligibility(orderId: SalesOrderId): { lines: DocumentLine[]; deliveryIds: DeliveryId[]; deliveryReferences: string[] } | undefined {
+    return this.invoiceEligibilityForState(this.state(), orderId);
   }
 
   createSalesOrder(input: { customerName: string; currency: CurrencyCode; lines: DocumentLine[] }): SalesOrder {
@@ -134,6 +140,42 @@ export class LocalSalesCycleStore {
     });
   }
 
+  createInvoiceFromOrder(orderId: SalesOrderId): Invoice | undefined {
+    let createdInvoice: Invoice | undefined;
+    this.updateState((state) => {
+      const order = state.salesOrders.find((candidate) => candidate.id === orderId);
+      const eligibility = this.invoiceEligibilityForState(state, orderId);
+      if (!order || !eligibility) return state;
+
+      createdInvoice = {
+        id: this.invoiceId(),
+        reference: this.reference('INV'),
+        orderId: order.id,
+        orderReference: order.reference,
+        deliveryIds: eligibility.deliveryIds,
+        deliveryReferences: eligibility.deliveryReferences,
+        status: 'draft',
+        currency: order.currency,
+        lines: eligibility.lines,
+        createdAt: new Date().toISOString(),
+      };
+      return { ...state, invoices: [createdInvoice, ...state.invoices] };
+    });
+    return createdInvoice;
+  }
+
+  publishInvoice(invoiceId: InvoiceId): void {
+    this.transitionInvoice(invoiceId, 'published');
+  }
+
+  voidInvoice(invoiceId: InvoiceId): void {
+    this.transitionInvoice(invoiceId, 'voided');
+  }
+
+  setInvoicePaymentStatus(invoiceId: InvoiceId, status: Extract<InvoiceStatus, 'partial' | 'paid'>): void {
+    this.transitionInvoice(invoiceId, status);
+  }
+
   private updateState(update: (state: SalesCycleState) => SalesCycleState): void {
     const nextState = update(this.state());
     if (nextState === this.state()) return;
@@ -147,6 +189,66 @@ export class LocalSalesCycleStore {
 
   private deliveryId(): DeliveryId {
     return `delivery-${this.identifier()}` as DeliveryId;
+  }
+
+  private invoiceId(): InvoiceId {
+    return `invoice-${this.identifier()}` as InvoiceId;
+  }
+
+  private transitionInvoice(invoiceId: InvoiceId, targetStatus: InvoiceStatus): void {
+    this.updateState((state) => {
+      const invoice = state.invoices.find((candidate) => candidate.id === invoiceId);
+      if (!invoice || !this.canTransitionInvoice(invoice.status, targetStatus)) return state;
+      return {
+        ...state,
+        invoices: state.invoices.map((candidate) =>
+          candidate.id === invoiceId ? { ...candidate, status: targetStatus } : candidate,
+        ),
+      };
+    });
+  }
+
+  private canTransitionInvoice(currentStatus: InvoiceStatus, targetStatus: InvoiceStatus): boolean {
+    if (currentStatus === 'draft') return targetStatus === 'published' || targetStatus === 'voided';
+    if (currentStatus === 'published') return targetStatus === 'partial' || targetStatus === 'paid' || targetStatus === 'voided';
+    if (currentStatus === 'partial') return targetStatus === 'paid' || targetStatus === 'voided';
+    return false;
+  }
+
+  private invoiceEligibilityForState(
+    state: SalesCycleState,
+    orderId: SalesOrderId,
+  ): { lines: DocumentLine[]; deliveryIds: DeliveryId[]; deliveryReferences: string[] } | undefined {
+    const order = state.salesOrders.find((candidate) => candidate.id === orderId);
+    if (!order) return undefined;
+
+    const validatedDeliveries = state.deliveries.filter(
+      (delivery) => delivery.orderId === orderId && delivery.status === 'validated',
+    );
+    const deliveredByProduct = this.quantitiesByProduct(validatedDeliveries.flatMap((delivery) => delivery.lines));
+    const invoicedByProduct = this.quantitiesByProduct(
+      state.invoices
+        .filter((invoice) => invoice.orderId === orderId && invoice.status !== 'voided')
+        .flatMap((invoice) => invoice.lines),
+    );
+    const lines = order.lines.flatMap((line) => {
+      const pendingQuantity = Math.max(
+        0,
+        (deliveredByProduct.get(line.productId) ?? 0) - (invoicedByProduct.get(line.productId) ?? 0),
+      );
+      return pendingQuantity > 0 ? [{ ...line, quantity: pendingQuantity }] : [];
+    });
+    if (lines.length === 0) return undefined;
+
+    const pendingProductIds = new Set(lines.map((line) => line.productId));
+    const sourceDeliveries = validatedDeliveries.filter((delivery) =>
+      delivery.lines.some((line) => pendingProductIds.has(line.productId)),
+    );
+    return {
+      lines,
+      deliveryIds: sourceDeliveries.map((delivery) => delivery.id),
+      deliveryReferences: sourceDeliveries.map((delivery) => delivery.reference),
+    };
   }
 
   private quantitiesByProduct(lines: DocumentLine[]): Map<ProductId, number> {

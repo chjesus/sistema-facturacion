@@ -92,6 +92,48 @@ export class LocalSalesCycleStore {
     }));
   }
 
+  validateDelivery(deliveryId: DeliveryId): void {
+    this.updateState((state) => {
+      const delivery = state.deliveries.find((candidate) => candidate.id === deliveryId);
+      if (!delivery || delivery.status !== 'pending') return state;
+
+      const deliveredQuantities = this.quantitiesByProduct(delivery.lines);
+      const canFulfillDelivery = [...deliveredQuantities].every(([productId, quantity]) => {
+        const item = state.inventory.find((candidate) => candidate.id === productId);
+        return item !== undefined && item.availableQuantity >= quantity;
+      });
+      if (!canFulfillDelivery) return state;
+
+      return {
+        ...state,
+        salesOrders: state.salesOrders.map((order) =>
+          order.id === delivery.orderId ? { ...order, status: 'completed' } : order,
+        ),
+        deliveries: state.deliveries.map((candidate) =>
+          candidate.id === deliveryId ? { ...candidate, status: 'validated' } : candidate,
+        ),
+        inventory: state.inventory.map((item) => ({
+          ...item,
+          availableQuantity: item.availableQuantity - (deliveredQuantities.get(item.id) ?? 0),
+        })),
+      };
+    });
+  }
+
+  cancelDelivery(deliveryId: DeliveryId): void {
+    this.updateState((state) => {
+      const delivery = state.deliveries.find((candidate) => candidate.id === deliveryId);
+      if (!delivery || delivery.status !== 'pending') return state;
+
+      return {
+        ...state,
+        deliveries: state.deliveries.map((candidate) =>
+          candidate.id === deliveryId ? { ...candidate, status: 'cancelled' } : candidate,
+        ),
+      };
+    });
+  }
+
   private updateState(update: (state: SalesCycleState) => SalesCycleState): void {
     const nextState = update(this.state());
     if (nextState === this.state()) return;
@@ -105,6 +147,13 @@ export class LocalSalesCycleStore {
 
   private deliveryId(): DeliveryId {
     return `delivery-${this.identifier()}` as DeliveryId;
+  }
+
+  private quantitiesByProduct(lines: DocumentLine[]): Map<ProductId, number> {
+    return lines.reduce((quantities, line) => {
+      quantities.set(line.productId, (quantities.get(line.productId) ?? 0) + line.quantity);
+      return quantities;
+    }, new Map<ProductId, number>());
   }
 
   private reference(prefix: string): string {

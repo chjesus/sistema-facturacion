@@ -35,4 +35,41 @@ describe('LocalSalesCycleStore', () => {
     expect(store.salesOrders()[0].status).toBe('cancelled');
     expect(store.deliveries()).toHaveLength(0);
   });
+
+  it('validates a pending delivery once and deducts its exact quantities from inventory', () => {
+    const product = store.inventory()[0];
+    const initialStock = product.availableQuantity;
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [{ productId: product.id, description: product.name, quantity: 3, unitPrice: 0 }],
+    });
+    store.confirmSalesOrder(order.id);
+    const delivery = store.deliveries()[0];
+
+    store.validateDelivery(delivery.id);
+    store.validateDelivery(delivery.id);
+
+    expect(store.deliveries()[0].status).toBe('validated');
+    expect(store.salesOrders()[0].status).toBe('completed');
+    expect(store.inventory().find((item) => item.id === product.id)?.availableQuantity).toBe(initialStock - 3);
+  });
+
+  it('cancels a pending delivery without deducting inventory', () => {
+    const product = store.inventory()[0];
+    const initialStock = product.availableQuantity;
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [{ productId: product.id, description: product.name, quantity: 2, unitPrice: 0 }],
+    });
+    store.confirmSalesOrder(order.id);
+    const delivery = store.deliveries()[0];
+
+    store.cancelDelivery(delivery.id);
+    store.cancelDelivery(delivery.id);
+
+    expect(store.deliveries()[0].status).toBe('cancelled');
+    expect(store.inventory().find((item) => item.id === product.id)?.availableQuantity).toBe(initialStock);
+  });
 });

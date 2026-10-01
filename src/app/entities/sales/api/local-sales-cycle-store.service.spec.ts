@@ -36,6 +36,70 @@ describe('LocalSalesCycleStore', () => {
     expect(store.deliveries()).toHaveLength(0);
   });
 
+  it('uses suggested prices, preserves overrides and rounds line and order VAT totals consistently', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Northstar Studio',
+      currency: 'USD',
+      orderDate: '2026-10-01',
+      lines: [{ productId: product.id, description: product.name, quantity: 3, unitPrice: 10.005 }],
+    });
+
+    expect(store.suggestedUnitPrice(product.id)).toBe(49.95);
+    expect(order).toMatchObject({ orderDate: '2026-10-01', lines: [{ unitPrice: 10.01 }] });
+    expect(store.lineTotals(order.lines[0])).toEqual({ subtotal: 30.03, vat: 4.8, total: 34.83 });
+    expect(store.salesOrderTotals(order)).toEqual({ subtotal: 30.03, vat: 4.8, total: 34.83 });
+  });
+
+  it('uses a zero price fallback for persisted inventory without a suggested price', () => {
+    localStorage.setItem('sales-cycle-state-v1', JSON.stringify({
+      salesOrders: [], deliveries: [], invoices: [], payments: [], exchangeRates: [],
+      inventory: [{ id: 'legacy-product', sku: 'LEG-001', name: 'Legacy Product', availableQuantity: 1, unit: 'units' }],
+    }));
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({});
+    const legacyStore = TestBed.inject(LocalSalesCycleStore);
+
+    expect(legacyStore.suggestedUnitPrice(legacyStore.inventory()[0].id)).toBe(0);
+  });
+
+  it('keeps confirmed orders immutable while creating exactly one pending delivery', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({ customerName: 'Acme', currency: 'USD', orderDate: '2026-10-01', lines: [{ productId: product.id, description: product.name, quantity: 1, unitPrice: 20 }] });
+    store.confirmSalesOrder(order.id);
+    store.updateSalesOrder({ id: order.id, customerName: 'Changed', currency: 'EUR', orderDate: '2026-10-02', lines: [] });
+    store.confirmSalesOrder(order.id);
+
+    expect(store.salesOrders()[0]).toMatchObject({ customerName: 'Acme', currency: 'USD', orderDate: '2026-10-01', status: 'confirmed' });
+    expect(store.deliveries()).toHaveLength(1);
+  });
+
+  it('projects ordered, delivered, and invoiced quantities from linked documents', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({ customerName: 'Acme', currency: 'USD', lines: [{ productId: product.id, description: product.name, quantity: 2, unitPrice: 50 }] });
+    store.confirmSalesOrder(order.id);
+    store.validateDelivery(store.deliveries()[0].id);
+    store.createInvoiceFromOrder(order.id);
+
+    expect(store.orderLineQuantities(order.id, product.id)).toEqual({ ordered: 2, delivered: 2, invoiced: 2 });
+    expect(store.invoiceEligibility(order.id)).toBeUndefined();
+  });
+
+  it('blocks cancellation after a validated delivery and keeps cancellation available otherwise', () => {
+    const product = store.inventory()[0];
+    const draft = store.createSalesOrder({ customerName: 'Draft', currency: 'USD', lines: [{ productId: product.id, description: product.name, quantity: 1, unitPrice: 10 }] });
+    expect(store.canCancelSalesOrder(draft)).toBe(true);
+    store.cancelSalesOrder(draft.id);
+    expect(store.salesOrders()[0].status).toBe('cancelled');
+
+    const confirmed = store.createSalesOrder({ customerName: 'Confirmed', currency: 'USD', lines: [{ productId: product.id, description: product.name, quantity: 1, unitPrice: 10 }] });
+    store.confirmSalesOrder(confirmed.id);
+    store.validateDelivery(store.deliveries()[0].id);
+    expect(store.canCancelSalesOrder(store.salesOrders().find((order) => order.id === confirmed.id)!)).toBe(false);
+    store.cancelSalesOrder(confirmed.id);
+    expect(store.salesOrders().find((order) => order.id === confirmed.id)?.status).toBe('completed');
+  });
+
   it('validates a pending delivery once and deducts its exact quantities from inventory', () => {
     const product = store.inventory()[0];
     const initialStock = product.availableQuantity;

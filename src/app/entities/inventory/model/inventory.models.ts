@@ -6,4 +6,5 @@ export interface InventoryItem {
   name: string;
   availableQuantity: number;
   unit: string;
+  suggestedUnitPrice?: number;
 }

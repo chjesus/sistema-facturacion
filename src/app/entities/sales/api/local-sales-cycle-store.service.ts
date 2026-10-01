@@ -9,6 +9,8 @@ import {
   Invoice,
   InvoiceId,
   InvoiceStatus,
+  MonetaryTotals,
+  OrderLineQuantities,
   Payment,
   ProductId,
   SalesOrder,
@@ -47,6 +49,34 @@ export class LocalSalesCycleStore {
     return invoice.lines.reduce((total, line) => total + line.quantity * line.unitPrice, 0);
   }
 
+  lineTotals(line: DocumentLine): MonetaryTotals {
+    const subtotal = this.roundAmount(line.quantity * line.unitPrice);
+    const vat = this.roundAmount(subtotal * 0.16);
+    return { subtotal, vat, total: this.roundAmount(subtotal + vat) };
+  }
+
+  salesOrderTotals(order: SalesOrder): MonetaryTotals {
+    const subtotal = this.roundAmount(order.lines.reduce((total, line) => total + this.lineTotals(line).subtotal, 0));
+    const vat = this.roundAmount(order.lines.reduce((total, line) => total + this.lineTotals(line).vat, 0));
+    return { subtotal, vat, total: this.roundAmount(subtotal + vat) };
+  }
+
+  suggestedUnitPrice(productId: ProductId): number {
+    return this.roundAmount(this.inventory().find((item) => item.id === productId)?.suggestedUnitPrice ?? 0);
+  }
+
+  orderLineQuantities(orderId: SalesOrderId, productId: ProductId): OrderLineQuantities {
+    const order = this.salesOrders().find((candidate) => candidate.id === orderId);
+    const ordered = order?.lines.filter((line) => line.productId === productId).reduce((total, line) => total + line.quantity, 0) ?? 0;
+    const delivered = this.deliveries().filter((delivery) => delivery.orderId === orderId && delivery.status === 'validated')
+      .flatMap((delivery) => delivery.lines).filter((line) => line.productId === productId)
+      .reduce((total, line) => total + line.quantity, 0);
+    const invoiced = this.invoices().filter((invoice) => invoice.orderId === orderId && invoice.status !== 'voided')
+      .flatMap((invoice) => invoice.lines).filter((line) => line.productId === productId)
+      .reduce((total, line) => total + line.quantity, 0);
+    return { ordered, delivered, invoiced };
+  }
+
   invoiceSettledTotal(invoiceId: InvoiceId): number {
     return this.settledTotalForState(this.state(), invoiceId);
   }
@@ -68,19 +98,29 @@ export class LocalSalesCycleStore {
     return this.invoiceEligibilityForState(this.state(), orderId);
   }
 
-  createSalesOrder(input: { customerName: string; currency: CurrencyCode; lines: DocumentLine[] }): SalesOrder {
+  createSalesOrder(input: { customerName: string; currency: CurrencyCode; orderDate?: string; lines: DocumentLine[] }): SalesOrder {
     const order: SalesOrder = {
       id: this.salesOrderId(),
       reference: this.reference('SO'),
       customerName: input.customerName.trim(),
       status: 'draft',
       currency: input.currency,
-      lines: input.lines.map((line) => ({ ...line })),
+      lines: input.lines.map((line) => ({ ...line, unitPrice: this.roundAmount(line.unitPrice) })),
+      orderDate: input.orderDate ?? new Date().toISOString().slice(0, 10),
       createdAt: new Date().toISOString(),
     };
 
     this.updateState((state) => ({ ...state, salesOrders: [order, ...state.salesOrders] }));
     return order;
+  }
+
+  updateSalesOrder(input: { id: SalesOrderId; customerName: string; currency: CurrencyCode; orderDate: string; lines: DocumentLine[] }): void {
+    this.updateState((state) => ({
+      ...state,
+      salesOrders: state.salesOrders.map((order) => order.id === input.id && order.status === 'draft'
+        ? { ...order, customerName: input.customerName.trim(), currency: input.currency, orderDate: input.orderDate, lines: input.lines.map((line) => ({ ...line, unitPrice: this.roundAmount(line.unitPrice) })) }
+        : order),
+    }));
   }
 
   confirmSalesOrder(orderId: SalesOrderId): void {
@@ -109,14 +149,15 @@ export class LocalSalesCycleStore {
   }
 
   cancelSalesOrder(orderId: SalesOrderId): void {
-    this.updateState((state) => ({
-      ...state,
-      salesOrders: state.salesOrders.map((order) =>
-        order.id === orderId && (order.status === 'draft' || order.status === 'confirmed')
-          ? { ...order, status: 'cancelled' }
-          : order,
-      ),
-    }));
+    this.updateState((state) => {
+      const order = state.salesOrders.find((candidate) => candidate.id === orderId);
+      if (!order || !this.canCancelSalesOrderForState(state, order)) return state;
+      return { ...state, salesOrders: state.salesOrders.map((candidate) => candidate.id === orderId ? { ...candidate, status: 'cancelled' } : candidate) };
+    });
+  }
+
+  canCancelSalesOrder(order: SalesOrder): boolean {
+    return this.canCancelSalesOrderForState(this.state(), order);
   }
 
   validateDelivery(deliveryId: DeliveryId): void {
@@ -296,6 +337,15 @@ export class LocalSalesCycleStore {
     return invoice.status === 'published' || invoice.status === 'partial';
   }
 
+  private canCancelSalesOrderForState(state: SalesCycleState, order: SalesOrder): boolean {
+    if (order.status !== 'draft' && order.status !== 'confirmed') return false;
+    const hasValidatedDelivery = state.deliveries.some((delivery) => delivery.orderId === order.id && delivery.status === 'validated');
+    const hasCommittedInvoice = state.invoices.some((invoice) =>
+      invoice.orderId === order.id && (invoice.status === 'published' || invoice.status === 'partial' || invoice.status === 'paid'),
+    );
+    return !hasValidatedDelivery && !hasCommittedInvoice;
+  }
+
   private paymentPreviewForState(
     state: SalesCycleState,
     invoice: Invoice,
@@ -403,7 +453,12 @@ export class LocalSalesCycleStore {
     if (!stored) return this.seedState();
 
     try {
-      return JSON.parse(stored) as SalesCycleState;
+      const state = JSON.parse(stored) as SalesCycleState;
+      return {
+        ...state,
+        inventory: state.inventory.map((item) => ({ ...item, suggestedUnitPrice: this.roundAmount(item.suggestedUnitPrice ?? 0) })),
+        salesOrders: state.salesOrders.map((order) => ({ ...order, orderDate: order.orderDate ?? order.createdAt.slice(0, 10) })),
+      };
     } catch {
       return this.seedState();
     }
@@ -416,9 +471,9 @@ export class LocalSalesCycleStore {
       invoices: [],
       payments: [],
       inventory: [
-        { id: 'desk-lamp' as ProductId, sku: 'LGT-001', name: 'Arc Desk Lamp', availableQuantity: 24, unit: 'units' },
-        { id: 'notebook' as ProductId, sku: 'OFF-014', name: 'Hardcover Notebook', availableQuantity: 80, unit: 'units' },
-        { id: 'chair' as ProductId, sku: 'FUR-020', name: 'Ergonomic Chair', availableQuantity: 12, unit: 'units' },
+        { id: 'desk-lamp' as ProductId, sku: 'LGT-001', name: 'Arc Desk Lamp', availableQuantity: 24, unit: 'units', suggestedUnitPrice: 49.95 },
+        { id: 'notebook' as ProductId, sku: 'OFF-014', name: 'Hardcover Notebook', availableQuantity: 80, unit: 'units', suggestedUnitPrice: 12.5 },
+        { id: 'chair' as ProductId, sku: 'FUR-020', name: 'Ergonomic Chair', availableQuantity: 12, unit: 'units', suggestedUnitPrice: 275 },
       ],
       exchangeRates: this.seedExchangeRates(),
     };

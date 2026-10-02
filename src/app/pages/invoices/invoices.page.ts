@@ -20,6 +20,10 @@ const pageStyles = `
     </section>
   `,
   styles: [pageStyles, `
+    .eligible > button, .actions > button { background: var(--accent); border: 0; border-radius: 8px; box-shadow: 0 1px 2px rgb(79 70 229 / .25); color: #fff; cursor: pointer; font: inherit; font-weight: 750; padding: .72rem 1rem; }
+    .actions > button.secondary { background: var(--surface); border: 1px solid var(--border); box-shadow: none; color: var(--ink); }
+    .actions > button.danger { color: #b42318; }
+    .eligible > button:hover, .actions > button:first-child:hover { background: #4338ca; }
     .actions { align-items: stretch; flex-wrap: wrap; }
     .actions > button:first-child { flex: 1 1 12rem; min-height: 2.8rem; }
     .actions > button:last-child { flex: 0 1 auto; }

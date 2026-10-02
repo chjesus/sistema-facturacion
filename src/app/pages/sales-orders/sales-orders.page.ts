@@ -26,6 +26,7 @@ const pageStyles = `
     </section>
   `,
   styles: [pageStyles, `
+    .workspace > .panel { align-self: start; }
     .line-form { grid-template-columns: minmax(0, 1fr) minmax(0, .45fr) max-content; }
     .line-form > label { min-width: 0; }
     .line-form input, .line-form select { box-sizing: border-box; min-width: 0; width: 100%; }

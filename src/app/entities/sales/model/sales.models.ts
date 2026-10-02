@@ -68,8 +68,24 @@ export interface Invoice {
   deliveryReferences: string[];
   status: InvoiceStatus;
   currency: CurrencyCode;
-  lines: DocumentLine[];
+  lines: InvoiceLine[];
+  number?: string;
+  issueDate?: string;
+  issuedCurrency?: CurrencyCode;
+  vesFxRate?: number;
+  vesFxDate?: string;
+  vesEquivalentTotal?: number;
   createdAt: string;
+}
+
+export interface InvoiceLine extends DocumentLine {
+  deliveryId: DeliveryId;
+  deliveryReference: string;
+  deliveryLineIndex: number;
+  vatRate: number;
+  subtotal: number;
+  vat: number;
+  total: number;
 }
 
 export interface Payment {

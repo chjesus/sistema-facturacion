@@ -273,9 +273,9 @@ describe('LocalSalesCycleStore', () => {
     store.confirmPayment(firstPayment.id);
     expect(store.invoices()[0].status).toBe('partial');
     expect(store.invoiceSettledTotal(invoice.id)).toBe(40);
-    expect(store.invoiceBalance(store.invoices()[0])).toBe(60);
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(76);
 
-    const finalPayment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 60 })!;
+    const finalPayment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 76 })!;
     store.confirmPayment(finalPayment.id);
     expect(store.invoices()[0].status).toBe('paid');
     expect(store.invoiceBalance(store.invoices()[0])).toBe(0);
@@ -288,7 +288,7 @@ describe('LocalSalesCycleStore', () => {
     store.confirmPayment(payment.id);
 
     expect(store.payments()[0]).toMatchObject({ currency: 'VES', convertedAmount: 1, frozenRate: 38.5 });
-    expect(store.invoiceBalance(store.invoices()[0])).toBe(99);
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(115);
   });
 
   it('freezes the rate and its date when a payment is confirmed', () => {
@@ -308,13 +308,13 @@ describe('LocalSalesCycleStore', () => {
   it('rejects a payment that exceeds the remaining invoice balance', () => {
     const invoice = publishedInvoice('USD', 100);
 
-    expect(store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 101 })).toBeUndefined();
+    expect(store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 117 })).toBeUndefined();
     expect(store.payments()).toHaveLength(0);
   });
 
   it('voids a confirmed payment, restores the invoice balance, and retains its frozen rate', () => {
     const invoice = publishedInvoice('USD', 100);
-    const payment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 100 })!;
+    const payment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 116 })!;
     store.confirmPayment(payment.id);
     const confirmedPayment = store.payments()[0];
 
@@ -327,7 +327,47 @@ describe('LocalSalesCycleStore', () => {
       convertedAmount: confirmedPayment.convertedAmount,
     });
     expect(store.invoices()[0].status).toBe('published');
-    expect(store.invoiceBalance(store.invoices()[0])).toBe(100);
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(116);
+  });
+
+  it('snapshots delivery provenance and VAT-inclusive amounts without invoicing a backorder twice', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme', currency: 'USD',
+      lines: [{ productId: product.id, description: product.name, quantity: 3, unitPrice: 100 }],
+    });
+    store.confirmSalesOrder(order.id);
+    const original = store.deliveries()[0];
+    store.validateDelivery(original.id, [{ ...original.lines[0], quantity: 1 }]);
+    const firstInvoice = store.createInvoiceFromOrder(order.id)!;
+    const backorder = store.deliveries().find((delivery) => delivery.parentDeliveryId === original.id)!;
+    store.validateDelivery(backorder.id);
+    const secondInvoice = store.createInvoiceFromOrder(order.id)!;
+
+    expect(firstInvoice.lines[0]).toMatchObject({ deliveryId: original.id, deliveryLineIndex: 0, quantity: 1, subtotal: 100, vatRate: 0.16, vat: 16, total: 116 });
+    expect(secondInvoice.lines[0]).toMatchObject({ deliveryId: backorder.id, deliveryLineIndex: 0, quantity: 2, subtotal: 200, vat: 32, total: 232 });
+    expect(store.invoiceEligibility(order.id)).toBeUndefined();
+  });
+
+  it('publishes an immutable sequential number and VES snapshot that voiding does not reuse', () => {
+    const first = publishedInvoice('USD', 100);
+    const firstNumber = store.invoices().find((invoice) => invoice.id === first.id)!.number!;
+    store.voidInvoice(first.id);
+    const voided = store.invoices().find((invoice) => invoice.id === first.id)!;
+
+    const second = publishedInvoice('USD', 100);
+    const republished = store.invoices().find((invoice) => invoice.id === second.id)!;
+
+    expect(voided.status).toBe('voided');
+    expect(voided.number).toBe(firstNumber);
+    expect(voided.issueDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(voided.issuedCurrency).toBe('USD');
+    expect(voided.vesFxRate).toBeGreaterThan(0);
+    expect(voided.vesFxDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(voided.vesEquivalentTotal).toBeGreaterThan(0);
+    expect(firstNumber).toMatch(/^INV-\d{4}-000001$/);
+    expect(republished.number).toMatch(/^INV-\d{4}-000002$/);
+    expect(store.invoiceTotals(republished)).toEqual({ subtotal: 100, vat: 16, total: 116 });
   });
 
   function publishedInvoice(currency: 'USD' | 'VES' | 'EUR', unitPrice: number) {

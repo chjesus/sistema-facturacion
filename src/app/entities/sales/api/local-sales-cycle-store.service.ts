@@ -8,6 +8,7 @@ import {
   DocumentLine,
   Invoice,
   InvoiceId,
+  InvoiceLine,
   InvoiceStatus,
   MonetaryTotals,
   OrderLineQuantities,
@@ -54,7 +55,13 @@ export class LocalSalesCycleStore {
   }
 
   invoiceTotal(invoice: Invoice): number {
-    return invoice.lines.reduce((total, line) => total + line.quantity * line.unitPrice, 0);
+    return this.invoiceTotals(invoice).total;
+  }
+
+  invoiceTotals(invoice: Invoice): MonetaryTotals {
+    const subtotal = this.roundAmount(invoice.lines.reduce((total, line) => total + line.subtotal, 0));
+    const vat = this.roundAmount(invoice.lines.reduce((total, line) => total + line.vat, 0));
+    return { subtotal, vat, total: this.roundAmount(invoice.lines.reduce((total, line) => total + line.total, 0)) };
   }
 
   lineTotals(line: DocumentLine): MonetaryTotals {
@@ -309,7 +316,7 @@ export class LocalSalesCycleStore {
         id: `payment-${this.identifier()}`,
         reference: this.reference('PAY'),
         invoiceId: invoice.id,
-        invoiceReference: invoice.reference,
+        invoiceReference: invoice.number ?? invoice.reference,
         status: 'draft',
         currency: input.currency,
         amount: this.roundAmount(input.amount),
@@ -381,9 +388,11 @@ export class LocalSalesCycleStore {
       if (!invoice || !this.canTransitionInvoice(invoice.status, targetStatus)) return state;
       return {
         ...state,
-        invoices: state.invoices.map((candidate) =>
-          candidate.id === invoiceId ? { ...candidate, status: targetStatus } : candidate,
-        ),
+        invoices: state.invoices.map((candidate) => {
+          if (candidate.id !== invoiceId) return candidate;
+          if (targetStatus !== 'published') return { ...candidate, status: targetStatus };
+          return { ...candidate, ...this.publicationSnapshot(state, candidate), status: targetStatus };
+        }),
       };
     });
   }
@@ -455,6 +464,54 @@ export class LocalSalesCycleStore {
     };
   }
 
+  private invoiceLineSnapshot(line: DocumentLine, quantity: number, delivery: Delivery, deliveryLineIndex: number): InvoiceLine {
+    const totals = this.lineTotals({ ...line, quantity });
+    return {
+      ...line,
+      quantity,
+      deliveryId: delivery.id,
+      deliveryReference: delivery.reference,
+      deliveryLineIndex,
+      vatRate: 0.16,
+      ...totals,
+    };
+  }
+
+  private deliveryLineKey(deliveryId: DeliveryId, deliveryLineIndex: number): string {
+    return `${deliveryId}:${deliveryLineIndex}`;
+  }
+
+  private publicationSnapshot(state: SalesCycleState, invoice: Invoice, issueDate = new Date().toISOString().slice(0, 10)): Pick<Invoice, 'number' | 'issueDate' | 'issuedCurrency' | 'vesFxRate' | 'vesFxDate' | 'vesEquivalentTotal'> {
+    const vesRate = this.latestRateOnOrBefore(state, 'VES', issueDate);
+    const invoiceRate = this.latestRateOnOrBefore(state, invoice.currency, issueDate);
+    const vesEquivalentTotal = vesRate && invoiceRate
+      ? this.roundAmount((this.invoiceTotal(invoice) / invoiceRate.rateToUsd) * vesRate.rateToUsd)
+      : undefined;
+    return {
+      number: this.nextInvoiceNumber(state, issueDate),
+      issueDate,
+      issuedCurrency: invoice.currency,
+      vesFxRate: vesRate?.rateToUsd,
+      vesFxDate: vesRate?.date,
+      vesEquivalentTotal,
+    };
+  }
+
+  private latestRateOnOrBefore(state: SalesCycleState, currency: CurrencyCode, date: string): ExchangeRate | undefined {
+    return state.exchangeRates
+      .filter((rate) => rate.currency === currency && rate.date <= date)
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
+  }
+
+  private nextInvoiceNumber(state: SalesCycleState, issueDate: string): string {
+    const year = issueDate.slice(0, 4);
+    const sequence = state.invoices.reduce((maximum, invoice) => {
+      const match = invoice.number?.match(new RegExp(`^INV-${year}-(\\d{6})$`));
+      return Math.max(maximum, match ? Number(match[1]) : 0);
+    }, 0) + 1;
+    return `INV-${year}-${sequence.toString().padStart(6, '0')}`;
+  }
+
   private roundAmount(amount: number): number {
     return Math.round((amount + Number.EPSILON) * 100) / 100;
   }
@@ -462,32 +519,29 @@ export class LocalSalesCycleStore {
   private invoiceEligibilityForState(
     state: SalesCycleState,
     orderId: SalesOrderId,
-  ): { lines: DocumentLine[]; deliveryIds: DeliveryId[]; deliveryReferences: string[] } | undefined {
+  ): { lines: InvoiceLine[]; deliveryIds: DeliveryId[]; deliveryReferences: string[] } | undefined {
     const order = state.salesOrders.find((candidate) => candidate.id === orderId);
     if (!order) return undefined;
 
     const validatedDeliveries = state.deliveries.filter(
       (delivery) => delivery.orderId === orderId && delivery.status === 'validated',
     );
-    const deliveredByProduct = this.quantitiesByProduct(validatedDeliveries.flatMap((delivery) => delivery.lines));
-    const invoicedByProduct = this.quantitiesByProduct(
-      state.invoices
-        .filter((invoice) => invoice.orderId === orderId && invoice.status !== 'voided')
-        .flatMap((invoice) => invoice.lines),
-    );
-    const lines = order.lines.flatMap((line) => {
-      const pendingQuantity = Math.max(
-        0,
-        (deliveredByProduct.get(line.productId) ?? 0) - (invoicedByProduct.get(line.productId) ?? 0),
-      );
-      return pendingQuantity > 0 ? [{ ...line, quantity: pendingQuantity }] : [];
-    });
+    const invoicedByDeliveryLine = new Map<string, number>();
+    state.invoices
+      .filter((invoice) => invoice.orderId === orderId && invoice.status !== 'voided')
+      .flatMap((invoice) => invoice.lines)
+      .forEach((line) => {
+        const key = this.deliveryLineKey(line.deliveryId, line.deliveryLineIndex);
+        invoicedByDeliveryLine.set(key, (invoicedByDeliveryLine.get(key) ?? 0) + line.quantity);
+      });
+    const lines = validatedDeliveries.flatMap((delivery) => delivery.lines.flatMap((line, deliveryLineIndex) => {
+      const pendingQuantity = Math.max(0, line.quantity - (invoicedByDeliveryLine.get(this.deliveryLineKey(delivery.id, deliveryLineIndex)) ?? 0));
+      return pendingQuantity > 0 ? [this.invoiceLineSnapshot(line, pendingQuantity, delivery, deliveryLineIndex)] : [];
+    }));
     if (lines.length === 0) return undefined;
 
-    const pendingProductIds = new Set(lines.map((line) => line.productId));
-    const sourceDeliveries = validatedDeliveries.filter((delivery) =>
-      delivery.lines.some((line) => pendingProductIds.has(line.productId)),
-    );
+    const sourceDeliveryIds = new Set(lines.map((line) => line.deliveryId));
+    const sourceDeliveries = validatedDeliveries.filter((delivery) => sourceDeliveryIds.has(delivery.id));
     return {
       lines,
       deliveryIds: sourceDeliveries.map((delivery) => delivery.id),
@@ -518,22 +572,23 @@ export class LocalSalesCycleStore {
       const state = JSON.parse(stored) as Partial<SalesCycleState>;
       const inventory = (state.inventory ?? []).map((item) => this.migrateFixturePrice(item));
       const warehouses = this.withSecondaryWarehouse(state.warehouses?.length ? state.warehouses : [this.defaultWarehouse(inventory)], inventory);
+      const deliveries: Delivery[] = (state.deliveries ?? []).map((delivery) => {
+        const order = state.salesOrders?.find((candidate) => candidate.id === delivery.orderId);
+        const warehouse = warehouses.find((candidate) => candidate.id === delivery.warehouseId) ?? warehouses[0];
+        return {
+          ...delivery,
+          customerName: delivery.customerName ?? order?.customerName ?? 'Customer unavailable',
+          warehouseId: warehouse.id,
+          warehouseName: warehouse.name,
+        };
+      });
       const migratedState = {
         ...state,
         inventory,
         warehouses,
         salesOrders: (state.salesOrders ?? []).map((order) => ({ ...order, orderDate: order.orderDate ?? order.createdAt.slice(0, 10) })),
-        deliveries: (state.deliveries ?? []).map((delivery) => {
-          const order = state.salesOrders?.find((candidate) => candidate.id === delivery.orderId);
-          const warehouse = warehouses.find((candidate) => candidate.id === delivery.warehouseId) ?? warehouses[0];
-          return {
-            ...delivery,
-            customerName: delivery.customerName ?? order?.customerName ?? 'Customer unavailable',
-            warehouseId: warehouse.id,
-            warehouseName: warehouse.name,
-          };
-        }),
-        invoices: state.invoices ?? [],
+        deliveries,
+        invoices: this.migrateInvoices(state.invoices ?? [], deliveries, state.exchangeRates ?? []),
         payments: state.payments ?? [],
         exchangeRates: state.exchangeRates ?? [],
       } as SalesCycleState;
@@ -552,6 +607,53 @@ export class LocalSalesCycleStore {
       ? fixture.suggestedUnitPrice
       : existingPrice ?? 0;
     return { ...item, suggestedUnitPrice: this.roundAmount(suggestedUnitPrice) };
+  }
+
+  private migrateInvoices(invoices: unknown[], deliveries: Delivery[], exchangeRates: ExchangeRate[]): Invoice[] {
+    const typedInvoices = invoices as Invoice[];
+    const claimedQuantities = new Map<string, number>();
+    const migratedById = new Map<InvoiceId, Invoice>();
+    const chronological = [...typedInvoices].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+    chronological.forEach((invoice) => {
+      const lines = ((invoice.lines ?? []) as Array<DocumentLine | InvoiceLine>).flatMap((line) => {
+        if (this.isInvoiceLine(line)) return [line];
+        let remaining = line.quantity;
+        const allocated: InvoiceLine[] = [];
+        const sources = deliveries.filter((delivery) => (invoice.deliveryIds ?? []).includes(delivery.id) && delivery.status === 'validated');
+        for (const delivery of sources) {
+          for (const [deliveryLineIndex, deliveryLine] of delivery.lines.entries()) {
+            if (deliveryLine.productId !== line.productId || remaining <= 0) continue;
+            const key = this.deliveryLineKey(delivery.id, deliveryLineIndex);
+            const available = Math.max(0, deliveryLine.quantity - (claimedQuantities.get(key) ?? 0));
+            const quantity = Math.min(remaining, available);
+            if (quantity <= 0) continue;
+            allocated.push(this.invoiceLineSnapshot({ ...line, unitPrice: line.unitPrice ?? deliveryLine.unitPrice }, quantity, delivery, deliveryLineIndex));
+            remaining -= quantity;
+          }
+        }
+        return allocated.length > 0 ? allocated : [];
+      });
+      const migrated: Invoice = { ...invoice, lines };
+      if (migrated.status !== 'draft' && !migrated.number) {
+        const issueDate = migrated.createdAt.slice(0, 10);
+        Object.assign(migrated, this.publicationSnapshot({
+          salesOrders: [], deliveries, invoices: [...typedInvoices, ...migratedById.values()], payments: [], inventory: [], warehouses: [], exchangeRates,
+        }, migrated, issueDate));
+      }
+      if (migrated.status !== 'voided') {
+        migrated.lines.forEach((line) => {
+          const key = this.deliveryLineKey(line.deliveryId, line.deliveryLineIndex);
+          claimedQuantities.set(key, (claimedQuantities.get(key) ?? 0) + line.quantity);
+        });
+      }
+      migratedById.set(migrated.id, migrated);
+    });
+    return typedInvoices.map((invoice) => migratedById.get(invoice.id)!);
+  }
+
+  private isInvoiceLine(line: DocumentLine | InvoiceLine): line is InvoiceLine {
+    return 'deliveryId' in line && 'subtotal' in line && 'vat' in line && 'total' in line;
   }
 
   private seedState(): SalesCycleState {

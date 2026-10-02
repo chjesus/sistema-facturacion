@@ -1,0 +1,49 @@
+import { Component, computed, inject, signal } from '@angular/core';
+import { LocalSalesCycleStore } from '../../entities/sales/api/local-sales-cycle-store.service';
+import { Delivery, DeliveryId, DeliveryStatus } from '../../entities/sales/model/sales.models';
+import { CancelDeliveryComponent } from '../../features/cancel-delivery/cancel-delivery.component';
+import { ValidateDeliveryComponent } from '../../features/validate-delivery/validate-delivery.component';
+import { PanelComponent } from '../../shared/ui/panel.component';
+import { StatusBadgeComponent, StatusTone } from '../../shared/ui/status-badge.component';
+
+const statusTones: Record<DeliveryStatus, StatusTone> = {
+  pending: 'warning',
+  validated: 'success',
+  cancelled: 'danger',
+};
+
+@Component({
+  selector: 'app-delivery-workspace',
+  imports: [CancelDeliveryComponent, PanelComponent, StatusBadgeComponent, ValidateDeliveryComponent],
+  template: `
+    <section class="mt-10 grid gap-5 min-[761px]:grid-cols-[minmax(260px,.85fr)_minmax(0,1.15fr)]">
+      <section class="grid gap-3" aria-label="Delivery list">
+        @for (delivery of store.deliveries(); track delivery.id) {
+          <button type="button" class="w-full cursor-pointer rounded-panel border border-border bg-surface p-5 text-left" [class.border-accent]="delivery.id === selectedDeliveryId()" [class.shadow-[0_0_0_3px_#eef2ff]]="delivery.id === selectedDeliveryId()" (click)="selectDelivery(delivery)">
+            <span class="flex items-center justify-between gap-3"><span><span class="text-xs font-extrabold tracking-[.06em] text-ink">{{ delivery.reference }}</span><span class="mt-1 block text-lg font-bold tracking-[-.03em] text-ink">{{ delivery.orderReference }}</span></span><app-status-badge [label]="delivery.status" [tone]="statusTone(delivery.status)" /></span>
+            <span class="mt-3 flex justify-between gap-3 text-sm text-muted"><span>{{ delivery.warehouseName }}</span><span>{{ delivery.parentDeliveryId ? 'Backorder' : 'Original shipment' }}</span></span>
+          </button>
+        } @empty { <app-panel><h2 class="mb-4 text-xl font-bold tracking-[-.03em] text-ink">No deliveries yet</h2><p class="leading-relaxed text-muted">Confirm a sales order to create a pending delivery.</p></app-panel> }
+      </section>
+      @if (selectedDelivery(); as delivery) {
+        <app-panel label="Delivery detail">
+          <section>
+            <div class="flex items-center justify-between gap-3"><div><div class="text-xs font-extrabold tracking-[.06em] text-ink">{{ delivery.reference }}</div><h2 class="mt-1 text-xl font-bold tracking-[-.03em] text-ink">Delivery detail</h2></div><app-status-badge [label]="delivery.status" [tone]="statusTone(delivery.status)" /></div>
+            <div class="my-5 rounded-lg bg-surface-muted p-4"><strong class="mb-1 block">Source sales order · {{ delivery.orderReference }}</strong><span>{{ delivery.customerName }}</span>@if (delivery.parentDeliveryId) { <span class="block text-sm text-muted">Backorder of {{ delivery.parentDeliveryId }}</span> }</div>
+            @if (delivery.status === 'pending') { <app-validate-delivery [delivery]="delivery" /> }
+            @else { <div class="grid border-t border-border">@for (line of delivery.lines; track line.productId) { <div class="flex items-center justify-between gap-3 border-b border-border py-3"><strong>{{ line.description }}</strong><span class="text-sm text-muted">{{ line.quantity }} validated</span></div> }</div> }
+            @if (delivery.status === 'pending') { <div class="mt-4"><app-cancel-delivery [deliveryId]="delivery.id" /></div> }
+          </section>
+        </app-panel>
+      } @else { <app-panel><h2 class="mb-4 text-xl font-bold tracking-[-.03em] text-ink">Select a delivery</h2><p class="leading-relaxed text-muted">Choose a shipment to review its source order and quantities.</p></app-panel> }
+    </section>
+  `,
+})
+export class DeliveryWorkspaceComponent {
+  protected readonly store = inject(LocalSalesCycleStore);
+  protected readonly selectedDeliveryId = signal<DeliveryId | undefined>(this.store.deliveries()[0]?.id);
+  protected readonly selectedDelivery = computed(() => this.store.deliveries().find((delivery) => delivery.id === this.selectedDeliveryId()));
+
+  protected selectDelivery(delivery: Delivery): void { this.selectedDeliveryId.set(delivery.id); }
+  protected statusTone(status: DeliveryStatus): StatusTone { return statusTones[status]; }
+}

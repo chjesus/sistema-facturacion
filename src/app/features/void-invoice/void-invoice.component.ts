@@ -6,11 +6,13 @@ import { ButtonComponent } from '../../shared/ui/button.component';
 @Component({
   selector: 'app-void-invoice',
   imports: [ButtonComponent],
-  template: `<app-button variant="danger" (click)="voidInvoice()">Void invoice</app-button>`,
+  templateUrl: './void-invoice.component.html',
 })
 export class VoidInvoiceComponent {
   @Input({ required: true }) invoiceId!: InvoiceId;
   private readonly store = inject(LocalSalesCycleStore);
 
-  protected voidInvoice(): void { this.store.voidInvoice(this.invoiceId); }
+  protected voidInvoice(): void {
+    this.store.voidInvoice(this.invoiceId);
+  }
 }

@@ -5,9 +5,6 @@ import { InvoiceWorkspaceComponent } from '../../widgets/invoice-workspace/invoi
 @Component({
   selector: 'app-invoices-page',
   imports: [InvoiceWorkspaceComponent, PageHeadingComponent],
-  template: `
-    <app-page-heading eyebrow="Billing workspace" title="Invoices" description="Invoice validated delivery quantities with immutable publication and tax snapshots." />
-    <app-invoice-workspace />
-  `,
+  templateUrl: './invoices.page.html',
 })
 export class InvoicesPage {}

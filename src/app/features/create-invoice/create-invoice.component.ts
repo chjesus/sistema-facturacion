@@ -1,12 +1,15 @@
 import { Component, EventEmitter, Input, Output, inject } from '@angular/core';
 import { LocalSalesCycleStore } from '../../entities/sales/api/local-sales-cycle-store.service';
-import { InvoiceId, SalesOrderId } from '../../entities/sales/model/sales.models';
+import {
+  InvoiceId,
+  SalesOrderId,
+} from '../../entities/sales/model/sales.models';
 import { ButtonComponent } from '../../shared/ui/button.component';
 
 @Component({
   selector: 'app-create-invoice',
   imports: [ButtonComponent],
-  template: `<app-button (click)="createInvoice()">Create invoice</app-button>`,
+  templateUrl: './create-invoice.component.html',
 })
 export class CreateInvoiceComponent {
   @Input({ required: true }) orderId!: SalesOrderId;

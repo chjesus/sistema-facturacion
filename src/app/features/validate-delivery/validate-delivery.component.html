@@ -1,0 +1,50 @@
+<app-form-field label="Outgoing warehouse">
+  <select
+    class="w-full rounded-lg border border-border bg-white px-3 py-2.5 text-ink"
+    [ngModel]="delivery.warehouseId"
+    (ngModelChange)="selectWarehouse($event)"
+  >
+    @for (warehouse of store.warehouses(); track warehouse.id) {
+      <option [value]="warehouse.id">
+        {{ warehouse.name }} · {{ warehouse.code }}
+      </option>
+    }
+  </select>
+</app-form-field>
+<div class="mt-4 grid border-t border-border">
+  @for (line of delivery.lines; track line.productId) {
+    <div
+      class="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3"
+    >
+      <span>
+        <strong>{{ line.description }}</strong>
+        <span class="block text-sm text-muted">
+          {{ availableStock(line) }} available in {{ delivery.warehouseName }}
+        </span>
+      </span>
+      <app-form-field
+        label="To ship"
+        class="justify-items-end"
+      >
+        <input
+          class="w-24 rounded-lg border border-border bg-white px-3 py-2.5 text-ink"
+          [name]="'shipment-' + line.productId"
+          type="number"
+          min="1"
+          [max]="maxShipment(line)"
+          step="1"
+          [ngModel]="shipmentQuantity(line)"
+          (ngModelChange)="setShipmentQuantity(line, $event)"
+        />
+      </app-form-field>
+    </div>
+  }
+</div>
+<div class="mt-4">
+  <app-button
+    [disabled]="!canValidate()"
+    (click)="validateDelivery()"
+  >
+    Validate delivery
+  </app-button>
+</div>

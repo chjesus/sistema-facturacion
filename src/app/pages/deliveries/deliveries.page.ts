@@ -5,9 +5,6 @@ import { DeliveryWorkspaceComponent } from '../../widgets/delivery-workspace/del
 @Component({
   selector: 'app-deliveries-page',
   imports: [DeliveryWorkspaceComponent, PageHeadingComponent],
-  template: `
-    <app-page-heading eyebrow="Warehouse workspace" title="Deliveries" description="Ship available goods, preserve their order source, and create backorders only for outstanding quantities." />
-    <app-delivery-workspace />
-  `,
+  templateUrl: './deliveries.page.html',
 })
 export class DeliveriesPage {}

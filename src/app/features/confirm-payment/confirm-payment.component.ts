@@ -5,11 +5,13 @@ import { ButtonComponent } from '../../shared/ui/button.component';
 @Component({
   selector: 'app-confirm-payment',
   imports: [ButtonComponent],
-  template: `<app-button (click)="confirmPayment()">Confirm</app-button>`,
+  templateUrl: './confirm-payment.component.html',
 })
 export class ConfirmPaymentComponent {
   @Input({ required: true }) paymentId!: string;
   private readonly store = inject(LocalSalesCycleStore);
 
-  protected confirmPayment(): void { this.store.confirmPayment(this.paymentId); }
+  protected confirmPayment(): void {
+    this.store.confirmPayment(this.paymentId);
+  }
 }

@@ -6,11 +6,13 @@ import { ButtonComponent } from '../../shared/ui/button.component';
 @Component({
   selector: 'app-publish-invoice',
   imports: [ButtonComponent],
-  template: `<app-button class="block [&>button]:min-h-[2.8rem] [&>button]:w-full" (click)="publishInvoice()">Publish invoice</app-button>`,
+  templateUrl: './publish-invoice.component.html',
 })
 export class PublishInvoiceComponent {
   @Input({ required: true }) invoiceId!: InvoiceId;
   private readonly store = inject(LocalSalesCycleStore);
 
-  protected publishInvoice(): void { this.store.publishInvoice(this.invoiceId); }
+  protected publishInvoice(): void {
+    this.store.publishInvoice(this.invoiceId);
+  }
 }

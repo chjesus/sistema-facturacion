@@ -8,22 +8,26 @@ import { PaymentHistoryComponent } from '../payment-history/payment-history.comp
 @Component({
   selector: 'app-payment-workspace',
   imports: [PanelComponent, PaymentHistoryComponent, RegisterPaymentComponent],
-  template: `
-    @if (selectedInvoice(); as invoice) {
-      <app-panel class="mt-10 block" label="Selected invoice"><span class="text-xs font-extrabold tracking-[.12em] text-accent uppercase">Selected invoice</span><h2 class="mt-2 text-xl font-bold tracking-[-.03em] text-ink">{{ invoice.number ?? invoice.reference }}</h2><p class="mt-2 leading-relaxed text-muted">{{ invoice.orderReference }} · {{ money(store.invoiceBalance(invoice), invoice.currency) }} remaining</p></app-panel>
-      <section class="mt-5 grid gap-5 min-[761px]:grid-cols-2"><app-register-payment [invoice]="invoice" /><app-payment-history [invoiceId]="invoice.id" [currency]="invoice.currency" /></section>
-    } @else {
-      <app-panel class="mt-10 block"><h2 class="mb-4 text-xl font-bold tracking-[-.03em] text-ink">Invoice required</h2><p class="leading-relaxed text-muted">Open Register Payment from a published or partial invoice with a positive balance.</p></app-panel>
-    }
-  `,
+  templateUrl: './payment-workspace.component.html',
 })
 export class PaymentWorkspaceComponent {
   readonly invoiceId = input<string | null>(null);
   protected readonly store = inject(LocalSalesCycleStore);
   protected readonly selectedInvoice = computed(() => {
-    const invoice = this.store.invoices().find((candidate) => candidate.id === this.invoiceId());
-    return invoice && (invoice.status === 'published' || invoice.status === 'partial') && this.store.invoiceBalance(invoice) > 0 ? invoice : undefined;
+    const invoice = this.store
+      .invoices()
+      .find((candidate) => candidate.id === this.invoiceId());
+    return invoice &&
+      (invoice.status === 'published' || invoice.status === 'partial') &&
+      this.store.invoiceBalance(invoice) > 0
+      ? invoice
+      : undefined;
   });
 
-  protected money(amount: number, currency: Invoice['currency']): string { return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount); }
+  protected money(amount: number, currency: Invoice['currency']): string {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+    }).format(amount);
+  }
 }

@@ -6,12 +6,10 @@ import { PaymentWorkspaceComponent } from '../../widgets/payment-workspace/payme
 @Component({
   selector: 'app-payments-page',
   imports: [PageHeadingComponent, PaymentWorkspaceComponent],
-  template: `
-    <app-page-heading eyebrow="Settlement workspace" title="Register payment" description="Record a dated payment against the invoice that opened this workspace." />
-    <app-payment-workspace [invoiceId]="invoiceId" />
-  `,
+  templateUrl: './payments.page.html',
 })
 export class PaymentsPage {
   private readonly route = inject(ActivatedRoute);
-  protected readonly invoiceId = this.route.snapshot.queryParamMap.get('invoiceId');
+  protected readonly invoiceId =
+    this.route.snapshot.queryParamMap.get('invoiceId');
 }

@@ -1,4 +1,4 @@
-import { Component, Input, inject } from '@angular/core';
+import { Component, computed, inject, input } from '@angular/core';
 import { RegisterPaymentComponent } from '../../features/register-payment/register-payment.component';
 import { LocalSalesCycleStore } from '../../entities/sales/api/local-sales-cycle-store.service';
 import { Invoice } from '../../entities/sales/model/sales.models';
@@ -9,7 +9,7 @@ import { PaymentHistoryComponent } from '../payment-history/payment-history.comp
   selector: 'app-payment-workspace',
   imports: [PanelComponent, PaymentHistoryComponent, RegisterPaymentComponent],
   template: `
-    @if (invoice) {
+    @if (selectedInvoice(); as invoice) {
       <app-panel class="mt-10 block" label="Selected invoice"><span class="text-xs font-extrabold tracking-[.12em] text-accent uppercase">Selected invoice</span><h2 class="mt-2 text-xl font-bold tracking-[-.03em] text-ink">{{ invoice.number ?? invoice.reference }}</h2><p class="mt-2 leading-relaxed text-muted">{{ invoice.orderReference }} · {{ money(store.invoiceBalance(invoice), invoice.currency) }} remaining</p></app-panel>
       <section class="mt-5 grid gap-5 min-[761px]:grid-cols-2"><app-register-payment [invoice]="invoice" /><app-payment-history [invoiceId]="invoice.id" [currency]="invoice.currency" /></section>
     } @else {
@@ -18,8 +18,12 @@ import { PaymentHistoryComponent } from '../payment-history/payment-history.comp
   `,
 })
 export class PaymentWorkspaceComponent {
-  @Input() invoice: Invoice | undefined;
+  readonly invoiceId = input<string | null>(null);
   protected readonly store = inject(LocalSalesCycleStore);
+  protected readonly selectedInvoice = computed(() => {
+    const invoice = this.store.invoices().find((candidate) => candidate.id === this.invoiceId());
+    return invoice && (invoice.status === 'published' || invoice.status === 'partial') && this.store.invoiceBalance(invoice) > 0 ? invoice : undefined;
+  });
 
   protected money(amount: number, currency: Invoice['currency']): string { return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount); }
 }

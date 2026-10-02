@@ -1,35 +1,34 @@
-# Sales Cycle Frontend
+# Sistema de Facturación
 
-A modern Angular application that models an end-to-end commercial cycle:
-**Sales Order → Delivery → Invoice → Payment**.
+Aplicación Angular moderna que modela un ciclo comercial completo:
+**Orden de venta → Despacho → Factura → Pago**.
 
-It is a frontend-only technical project with local persistence, warehouse-aware
-inventory, multi-currency payments, and business safeguards inspired by an
-ERP workflow.
+Es un proyecto técnico frontend con persistencia local, inventario por almacén,
+pagos multimoneda y reglas de negocio inspiradas en un flujo ERP.
 
-## Highlights
+## Aspectos destacados
 
-- **Angular 22** with standalone components and lazy routes.
-- **Pragmatic Feature-Sliced Design (FSD)** for application, shared, feature,
-  widget, page, and entity boundaries.
-- **Tailwind CSS v4** shared design tokens and reusable UI primitives.
-- **Local transactional safeguards** for the browser demo.
-- **USD, VES, and EUR** payment support with dated exchange-rate snapshots.
-- **Prettier and Angular ESLint** checks for readable templates and code.
+- **Angular 22** con componentes standalone y rutas perezosas.
+- **Feature-Sliced Design (FSD)** pragmática para las capas de aplicación,
+  compartidos, funcionalidades, widgets, páginas y entidades.
+- **Tailwind CSS v4** con tokens de diseño compartidos y primitivas de UI.
+- Salvaguardas transaccionales locales para la demostración en el navegador.
+- Pagos en **USD, VES y EUR** con instantáneas de tasas por fecha.
+- Validaciones de **Prettier y Angular ESLint** para templates y código legibles.
 
 > [!NOTE]
-> Data is persisted in the browser through `localStorage`. Browser locks protect
-> same-origin tabs only. A future Supabase backend should own cross-device
-> transactions and audit guarantees.
+> Los datos se persisten en el navegador mediante `localStorage`. Los bloqueos del
+> navegador protegen únicamente las pestañas del mismo origen. Un backend futuro
+> con Supabase deberá gestionar las transacciones y auditoría entre dispositivos.
 
-## Quick Start
+## Inicio rápido
 
-### Prerequisites
+### Requisitos previos
 
-- Node.js compatible with Angular 22.
-- npm 11 or later.
+- Node.js compatible con Angular 22.
+- npm 11 o posterior.
 
-### Install and Run
+### Instalación y ejecución
 
 ```bash
 git clone <repository-url>
@@ -38,25 +37,25 @@ npm install
 npm start
 ```
 
-Open [http://localhost:4200](http://localhost:4200) in your browser.
+Abre [http://localhost:4200](http://localhost:4200) en el navegador.
 
-## Commands
+## Comandos
 
-| Command                     | Purpose                                           |
-| --------------------------- | ------------------------------------------------- |
-| `npm start`                 | Start the Angular development server.             |
-| `npm run build`             | Create a production build in `dist/`.             |
-| `npm test -- --watch=false` | Run the unit test suite once.                     |
-| `npm run lint`              | Run Angular ESLint checks.                        |
-| `npm run format`            | Apply Prettier to Angular HTML templates.         |
-| `npm run format:check`      | Check template formatting without changing files. |
+| Comando                     | Propósito                                        |
+| --------------------------- | ------------------------------------------------ |
+| `npm start`                 | Inicia el servidor de desarrollo de Angular.     |
+| `npm run build`             | Genera una compilación de producción en `dist/`. |
+| `npm test -- --watch=false` | Ejecuta la suite de pruebas unitarias una vez.   |
+| `npm run lint`              | Ejecuta las validaciones de Angular ESLint.      |
+| `npm run format`            | Aplica Prettier a los templates HTML de Angular. |
+| `npm run format:check`      | Revisa el formato sin modificar archivos.        |
 
-## Code Quality Workflow
+## Flujo de calidad del código
 
-The repository uses Prettier with an Angular HTML parser and an 80-character
-readability target. Angular ESLint enforces the project's linting rules.
+El repositorio usa Prettier con el parser HTML de Angular y una meta de lectura
+de 80 caracteres. Angular ESLint aplica las reglas de linting del proyecto.
 
-Before committing, run:
+Antes de hacer un commit, ejecuta:
 
 ```bash
 npm run format
@@ -66,82 +65,84 @@ npm test -- --watch=false
 npm run build
 ```
 
-Prettier's `printWidth` guides line wrapping. ESLint catches remaining
-readability and correctness issues. Long Tailwind class values are treated as
-intentional template data and remain readable through multiline markup.
+`printWidth` de Prettier guía el salto de línea. ESLint detecta los problemas
+restantes de lectura y corrección. Los valores largos de clases Tailwind se
+mantienen como datos intencionales del template y se muestran en varias líneas.
 
-## The Four Deliverables
+## Los cuatro entregables
 
-| View             | Main outcome                                                                               | Important safeguards                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| **Sales Orders** | Create customer orders with products, prices, date, currency, VAT, and totals.             | Confirmed orders are immutable; cancellation is blocked after validated delivery or committed invoice. |
-| **Deliveries**   | Ship order lines from a selected warehouse and create backorders for unshipped quantities. | Warehouse stock cannot go negative; validated quantities cannot exceed their source order line.        |
-| **Invoices**     | Invoice validated, uninvoiced delivery lines and publish a numbered fiscal snapshot.       | VAT totals, delivery provenance, VES equivalent, and publication data are immutable.                   |
-| **Payments**     | Register dated, mixed-currency payments from a payable invoice.                            | Rate snapshots, overpayment protection, payment history, and reversal-aware balances.                  |
+| Vista                | Resultado principal                                                             | Salvaguardas importantes                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **Órdenes de venta** | Crea órdenes de clientes con productos, precios, fecha, moneda, IVA y totales.  | Las órdenes confirmadas son inmutables; no se pueden cancelar después de un despacho validado o una factura comprometida. |
+| **Despachos**        | Despacha líneas desde un almacén y crea backorders para cantidades pendientes.  | El stock no puede ser negativo; las cantidades validadas no superan la línea de origen.                                   |
+| **Facturas**         | Factura líneas de despacho validadas y publica una instantánea fiscal numerada. | Totales con IVA, procedencia del despacho, equivalente en VES y datos de publicación inmutables.                          |
+| **Pagos**            | Registra pagos multimoneda y fechados desde una factura cobrable.               | Instantáneas de tasa, protección contra sobrepagos, historial y saldos conscientes de anulaciones.                        |
 
-## Business Flow
+## Flujo de negocio
 
-1. **Create a Sales Order** with a customer, date, currency, products,
-   quantities, and editable unit prices.
-2. **Confirm the order** to create its initial pending delivery.
-3. **Validate a Delivery** from an outgoing warehouse. A partial shipment
-   creates a linked pending backorder for the remaining quantities.
-4. **Create an Invoice** only from validated delivery quantities that have not
-   been invoiced.
-5. **Publish the Invoice** to assign its sequential number, issue snapshot, and
-   VES equivalent.
-6. **Register Payments** from the published or partially paid invoice. Payments
-   may use USD, VES, or EUR.
-7. **Complete the order** only after every line is delivered, invoiced, and all
-   related invoices are paid.
+1. **Crea una orden de venta** con cliente, fecha, moneda, productos,
+   cantidades y precios unitarios editables.
+2. **Confirma la orden** para crear su primer despacho pendiente.
+3. **Valida un despacho** desde un almacén de salida. Un despacho parcial crea
+   un backorder pendiente enlazado con las cantidades restantes.
+4. **Crea una factura** solo con cantidades validadas que aún no se hayan
+   facturado.
+5. **Publica la factura** para asignar su número correlativo, instantánea de
+   emisión y equivalente en VES.
+6. **Registra pagos** desde la factura publicada o parcialmente pagada. Los
+   pagos pueden usar USD, VES o EUR.
+7. **Completa la orden** solo después de despachar y facturar todas sus líneas,
+   y de pagar todas las facturas relacionadas.
 
-## Core Business Rules
+## Reglas de negocio principales
 
-- A delivery cannot exceed its pending order quantity or selected warehouse
-  stock.
-- Invoice quantities cannot exceed validated delivery quantities.
-- Confirmed payments, converted to the invoice currency, cannot exceed the
-  invoice total by more than `0.01`.
-- Payment conversion is rounded to two decimals:
+- Un despacho no puede superar la cantidad pendiente ni el stock del almacén
+  seleccionado.
+- Las cantidades facturadas no pueden superar las cantidades validadas.
+- Los pagos confirmados, convertidos a la moneda de la factura, no pueden
+  superar el total de la factura por más de `0.01`.
+- La conversión de pago se redondea a dos decimales:
 
   ```text
-  invoice amount = paid amount × invoice-currency rate ÷ payment-currency rate
+  monto en moneda de factura = monto pagado × tasa de la moneda de factura ÷ tasa de la moneda del pago
   ```
 
-- Confirmed, validated, and published document content is immutable. Financial
-  reversals use cancellation or void transitions instead of destructive edits.
-- Sequential `SO`, `DES`, `FAC`, and `PAG` references are allocated from durable
-  local counters.
+- El contenido de documentos confirmados, validados y publicados es inmutable.
+  Las reversiones financieras usan transiciones de cancelación o anulación, no
+  ediciones destructivas.
+- Las referencias correlativas `SO`, `DES`, `FAC` y `PAG` provienen de contadores
+  locales durables.
 
-## Project Structure
+## Estructura del proyecto
 
 ```text
 src/app/
-├── app/        # Bootstrap, routing, and application shell
-├── entities/   # Transactional sales, inventory, and exchange-rate models
-├── features/   # Focused user actions (create, confirm, publish, void)
-├── pages/      # Route composition layers
-├── shared/     # Tailwind tokens, UI primitives, and utilities
-└── widgets/    # View-specific workspaces and compositions
+├── app/        # Bootstrap, enrutamiento y shell de la aplicación
+├── entities/   # Modelos transaccionales de ventas, inventario y tasas
+├── features/   # Acciones de usuario enfocadas (crear, confirmar, publicar, anular)
+├── pages/      # Capas de composición de rutas
+├── shared/     # Tokens Tailwind, primitivas de UI y utilidades
+└── widgets/    # Espacios de trabajo y composiciones por vista
 ```
 
-`LocalSalesCycleStore` is the current transactional boundary. It uses revisioned
-state, durable counters, line provenance, `navigator.locks` where available,
-and cross-tab refresh notifications. This is intentionally a local demo seam
-for a later Supabase implementation.
+`LocalSalesCycleStore` es el límite transaccional actual. Usa estado con
+revisión, contadores durables, procedencia de líneas, `navigator.locks` cuando
+está disponible y notificaciones de actualización entre pestañas. Es un punto
+de integración local pensado para una implementación futura con Supabase.
 
-## Verification Status
+## Estado de verificación
 
-The project currently verifies:
+El proyecto verifica actualmente:
 
-- Prettier template formatting.
-- Angular ESLint rules.
-- Unit tests for sales, delivery, invoice, payment, FX, and invariant behavior.
-- Production build generation.
+- Formato de templates con Prettier.
+- Reglas de Angular ESLint.
+- Pruebas unitarias de ventas, despachos, facturas, pagos, tasas e invariantes.
+- Generación de la compilación de producción.
 
-## Scope
+## Alcance
 
-Included: the four commercial views and their connected workflow.
+Incluye: las cuatro vistas comerciales y su flujo conectado.
 
-Not included: authentication, backend APIs, tax administration, reporting,
-customer management, warehouse management screens, or cross-device concurrency.
+No incluye: autenticación, APIs backend, administración de impuestos, reportes,
+gestión de clientes, pantallas de gestión de almacenes o concurrencia entre
+dispositivos.

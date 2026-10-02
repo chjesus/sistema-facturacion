@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { vi } from 'vitest';
 import { LocalSalesCycleStore } from './local-sales-cycle-store.service';
 
 describe('LocalSalesCycleStore', () => {
@@ -700,8 +701,8 @@ describe('LocalSalesCycleStore', () => {
     expect(voided.vesFxRate).toBeGreaterThan(0);
     expect(voided.vesFxDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(voided.vesEquivalentTotal).toBeGreaterThan(0);
-    expect(firstNumber).toMatch(/^INV-\d{4}-000001$/);
-    expect(republished.number).toMatch(/^INV-\d{4}-000002$/);
+    expect(firstNumber).toBe('FAC-000001');
+    expect(republished.number).toBe('FAC-000002');
     expect(store.invoiceTotals(republished)).toEqual({
       subtotal: 100,
       vat: 16,
@@ -774,6 +775,145 @@ describe('LocalSalesCycleStore', () => {
     store.voidPayment(eur.id);
     expect(store.invoices()[0].status).toBe('partial');
     expect(store.invoiceBalance(store.invoices()[0])).toBe(76);
+  });
+
+  it('persists monotonic revisions, durable references, and line provenance', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 1,
+          unitPrice: 100,
+        },
+      ],
+    });
+    store.confirmSalesOrder(order.id);
+    store.validateDelivery(store.deliveries()[0].id);
+    const invoice = store.createInvoiceFromOrder(order.id)!;
+    store.publishInvoice(invoice.id);
+    const payment = store.createPayment(paymentInput(invoice.id, 'USD', 116))!;
+    store.confirmPayment(payment.id);
+
+    const persisted = JSON.parse(
+      localStorage.getItem('sales-cycle-state-v1') ?? '{}',
+    );
+    expect(order.reference).toBe('SO-000001');
+    expect(store.deliveries()[0].reference).toBe('DES-000001');
+    expect(store.invoices()[0].number).toBe('FAC-000001');
+    expect(store.payments()[0].documentReference).toBe('PAG-000001');
+    expect(store.invoices()[0].lines[0].sourceLineId).toBe(
+      order.lines[0].sourceLineId,
+    );
+    expect(persisted).toMatchObject({
+      revision: expect.any(Number),
+      counters: { SO: 1, DES: 1, FAC: 1, PAG: 1 },
+    });
+    expect(persisted.revision).toBeGreaterThan(0);
+  });
+
+  it('migrates legacy document lines without replacing their references', () => {
+    localStorage.setItem(
+      'sales-cycle-state-v1',
+      JSON.stringify({
+        salesOrders: [
+          {
+            id: 'so-legacy',
+            reference: 'SO-LEGACY',
+            customerName: 'Legacy Customer',
+            status: 'confirmed',
+            currency: 'USD',
+            lines: [
+              {
+                productId: 'desk-lamp',
+                description: 'Arc Desk Lamp',
+                quantity: 1,
+                unitPrice: 10,
+              },
+            ],
+            createdAt: '2026-10-01T00:00:00.000Z',
+          },
+        ],
+        deliveries: [
+          {
+            id: 'delivery-legacy',
+            reference: 'OUT-LEGACY',
+            orderId: 'so-legacy',
+            orderReference: 'SO-LEGACY',
+            status: 'validated',
+            lines: [
+              {
+                productId: 'desk-lamp',
+                description: 'Arc Desk Lamp',
+                quantity: 1,
+                unitPrice: 10,
+              },
+            ],
+            createdAt: '2026-10-01T00:00:00.000Z',
+          },
+        ],
+        invoices: [],
+        payments: [],
+        inventory: [],
+        exchangeRates: [],
+      }),
+    );
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({});
+    const legacyStore = TestBed.inject(LocalSalesCycleStore);
+
+    expect(legacyStore.salesOrders()[0]).toMatchObject({
+      reference: 'SO-LEGACY',
+      lines: [{ sourceLineId: 'legacy:order:so-legacy:line:0' }],
+    });
+    expect(legacyStore.deliveries()[0]).toMatchObject({
+      reference: 'OUT-LEGACY',
+      lines: [{ sourceLineId: 'legacy:order:so-legacy:line:0' }],
+    });
+    expect(
+      JSON.parse(localStorage.getItem('sales-cycle-state-v1') ?? '{}'),
+    ).toMatchObject({
+      revision: 0,
+      counters: { SO: 0, DES: 0, FAC: 0, PAG: 0 },
+    });
+  });
+
+  it('uses navigator locks for browser mutations when they are available', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    const request = vi.fn(
+      async (
+        _name: string,
+        _options: LockOptions,
+        callback: () => unknown,
+      ) => callback(),
+    );
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: { request },
+    });
+
+    try {
+      const created = store.createSalesOrder({
+        customerName: 'Lock test',
+        currency: 'USD',
+        lines: [],
+      });
+      const order = await (created as unknown as Promise<{
+        reference: string;
+      }>);
+      expect(request).toHaveBeenCalledWith(
+        'sales-cycle-state-v1',
+        { mode: 'exclusive' },
+        expect.any(Function),
+      );
+      expect(order.reference).toBe('SO-000001');
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, 'locks', descriptor);
+      else Reflect.deleteProperty(navigator, 'locks');
+    }
   });
 
   function publishedInvoice(

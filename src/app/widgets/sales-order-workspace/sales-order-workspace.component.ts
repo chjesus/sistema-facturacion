@@ -37,8 +37,14 @@ export class SalesOrderWorkspaceComponent {
     this.store.cancelSalesOrder(order.id);
   }
   protected createInvoice(order: SalesOrder): void {
-    if (this.store.createInvoiceFromOrder(order.id))
+    const invoice = this.store.createInvoiceFromOrder(order.id);
+    if (invoice instanceof Promise) {
+      void invoice.then((created) => {
+        if (created) void this.router.navigate(['/invoices']);
+      });
+    } else if (invoice) {
       void this.router.navigate(['/invoices']);
+    }
   }
   protected invoiceEligible(order: SalesOrder): boolean {
     return this.store.invoiceEligibility(order.id) !== undefined;

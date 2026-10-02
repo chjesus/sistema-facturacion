@@ -77,9 +77,9 @@ export class CreateSalesOrderComponent {
       lines.filter((line) => line.productId !== productId),
     );
   }
-  protected createOrder(): void {
+  protected async createOrder(): Promise<void> {
     if (!this.canCreate()) return;
-    this.store.createSalesOrder({
+    await this.store.createSalesOrder({
       customerName: this.customerName,
       currency: this.currency,
       orderDate: this.orderDate,

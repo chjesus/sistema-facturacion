@@ -23,6 +23,9 @@ import {
 } from '../model/sales.models';
 
 interface SalesCycleState {
+  /** Local transaction envelope revision; a future remote adapter replaces this seam. */
+  revision: number;
+  counters: DocumentCounters;
   salesOrders: SalesOrder[];
   deliveries: Delivery[];
   invoices: Invoice[];
@@ -30,6 +33,20 @@ interface SalesCycleState {
   inventory: InventoryItem[];
   warehouses: Warehouse[];
   exchangeRates: ExchangeRate[];
+}
+
+interface DocumentCounters {
+  SO: number;
+  DES: number;
+  FAC: number;
+  PAG: number;
+}
+
+type DocumentCounter = keyof DocumentCounters;
+
+interface MutationResult<T> {
+  state: SalesCycleState;
+  result: T;
 }
 
 export interface PaymentPreview {
@@ -40,6 +57,7 @@ export interface PaymentPreview {
 }
 
 const STORAGE_KEY = 'sales-cycle-state-v1';
+const LOCK_NAME = 'sales-cycle-state-v1';
 const DEFAULT_WAREHOUSE_ID = 'warehouse-main';
 const FIXTURE_PRICES = new Map<
   string,
@@ -62,6 +80,16 @@ const FIXTURE_PRICES = new Map<
 @Injectable({ providedIn: 'root' })
 export class LocalSalesCycleStore {
   private readonly state = signal<SalesCycleState>(this.readState());
+  private readonly channel = this.createChannel();
+
+  constructor() {
+    this.channel?.addEventListener('message', () => this.refreshFromStorage());
+    if (typeof window !== 'undefined') {
+      window.addEventListener('storage', (event) => {
+        if (event.key === STORAGE_KEY) this.refreshFromStorage();
+      });
+    }
+  }
 
   readonly salesOrders = computed(() => this.state().salesOrders);
   readonly deliveries = computed(() => this.state().deliveries);
@@ -206,25 +234,31 @@ export class LocalSalesCycleStore {
     orderDate?: string;
     lines: DocumentLine[];
   }): SalesOrder {
-    const order: SalesOrder = {
-      id: this.salesOrderId(),
-      reference: this.reference('SO'),
-      customerName: input.customerName.trim(),
-      status: 'draft',
-      currency: input.currency,
-      lines: input.lines.map((line) => ({
-        ...line,
-        unitPrice: this.roundAmount(line.unitPrice),
-      })),
-      orderDate: input.orderDate ?? new Date().toISOString().slice(0, 10),
-      createdAt: new Date().toISOString(),
-    };
-
-    this.updateState((state) => ({
-      ...state,
-      salesOrders: [order, ...state.salesOrders],
-    }));
-    return order;
+    return this.mutate((state) => {
+      const allocated = this.allocateReference(state, 'SO');
+      const order: SalesOrder = {
+        id: this.salesOrderId(),
+        reference: allocated.reference,
+        customerName: input.customerName.trim(),
+        status: 'draft',
+        currency: input.currency,
+        lines: input.lines.map((line, index) => ({
+          ...line,
+          sourceLineId: line.sourceLineId ?? `order:${allocated.reference}:${index}`,
+          unitPrice: this.roundAmount(line.unitPrice),
+        })),
+        orderDate: input.orderDate ?? new Date().toISOString().slice(0, 10),
+        createdAt: new Date().toISOString(),
+      };
+      return {
+        state: {
+          ...state,
+          counters: allocated.counters,
+          salesOrders: [order, ...state.salesOrders],
+        },
+        result: order,
+      };
+    }) as SalesOrder;
   }
 
   updateSalesOrder(input: {
@@ -260,9 +294,10 @@ export class LocalSalesCycleStore {
       );
       if (!order || order.status !== 'draft') return state;
 
+      const allocated = this.allocateReference(state, 'DES');
       const delivery: Delivery = {
         id: this.deliveryId(),
-        reference: this.reference('OUT'),
+        reference: allocated.reference,
         orderId: order.id,
         orderReference: order.reference,
         customerName: order.customerName,
@@ -275,6 +310,7 @@ export class LocalSalesCycleStore {
 
       return {
         ...state,
+        counters: allocated.counters,
         salesOrders: state.salesOrders.map((candidate) =>
           candidate.id === orderId
             ? { ...candidate, status: 'confirmed' }
@@ -388,22 +424,25 @@ export class LocalSalesCycleStore {
             }
           : candidate,
       );
-      const backorder: Delivery | undefined =
+      const backorderAllocation =
         backorderLines.length > 0
-          ? {
-              id: this.deliveryId(),
-              reference: this.reference('OUT'),
-              orderId: delivery.orderId,
-              orderReference: delivery.orderReference,
-              customerName: delivery.customerName,
-              warehouseId: delivery.warehouseId,
-              warehouseName: delivery.warehouseName,
-              parentDeliveryId: delivery.id,
-              status: 'pending',
-              lines: backorderLines,
-              createdAt: new Date().toISOString(),
-            }
+          ? this.allocateReference(state, 'DES')
           : undefined;
+      const backorder: Delivery | undefined = backorderAllocation
+        ? {
+            id: this.deliveryId(),
+            reference: backorderAllocation.reference,
+            orderId: delivery.orderId,
+            orderReference: delivery.orderReference,
+            customerName: delivery.customerName,
+            warehouseId: delivery.warehouseId,
+            warehouseName: delivery.warehouseName,
+            parentDeliveryId: delivery.id,
+            status: 'pending',
+            lines: backorderLines,
+            createdAt: new Date().toISOString(),
+          }
+        : undefined;
       const deliveries = backorder
         ? [backorder, ...nextDeliveries]
         : nextDeliveries;
@@ -427,6 +466,7 @@ export class LocalSalesCycleStore {
 
       return {
         ...state,
+        counters: backorderAllocation?.counters ?? state.counters,
         salesOrders: state.salesOrders.map((order) =>
           order.id === delivery.orderId
             ? { ...order, status: isCompleted ? 'completed' : 'confirmed' }
@@ -469,17 +509,16 @@ export class LocalSalesCycleStore {
   }
 
   createInvoiceFromOrder(orderId: SalesOrderId): Invoice | undefined {
-    let createdInvoice: Invoice | undefined;
-    this.updateState((state) => {
+    return this.mutate((state) => {
       const order = state.salesOrders.find(
         (candidate) => candidate.id === orderId,
       );
       const eligibility = this.invoiceEligibilityForState(state, orderId);
-      if (!order || !eligibility) return state;
+      if (!order || !eligibility) return { state, result: undefined };
 
-      createdInvoice = {
+      const createdInvoice: Invoice = {
         id: this.invoiceId(),
-        reference: this.reference('INV'),
+        reference: `draft-${this.identifier()}`,
         orderId: order.id,
         orderReference: order.reference,
         deliveryIds: eligibility.deliveryIds,
@@ -489,9 +528,11 @@ export class LocalSalesCycleStore {
         lines: eligibility.lines,
         createdAt: new Date().toISOString(),
       };
-      return { ...state, invoices: [createdInvoice, ...state.invoices] };
-    });
-    return createdInvoice;
+      return {
+        state: { ...state, invoices: [createdInvoice, ...state.invoices] },
+        result: createdInvoice,
+      };
+    }) as Invoice | undefined;
   }
 
   publishInvoice(invoiceId: InvoiceId): void {
@@ -511,8 +552,7 @@ export class LocalSalesCycleStore {
     reference: string;
     adjustedRate?: number;
   }): Payment | undefined {
-    let payment: Payment | undefined;
-    this.updateState((state) => {
+    return this.mutate((state) => {
       const invoice = state.invoices.find(
         (candidate) => candidate.id === input.invoiceId,
       );
@@ -534,10 +574,10 @@ export class LocalSalesCycleStore {
         !preview ||
         preview.convertedAmount > this.invoiceBalanceForState(state, invoice)
       ) {
-        return state;
+        return { state, result: undefined };
       }
 
-      payment = {
+      const payment: Payment = {
         id: `payment-${this.identifier()}`,
         reference: input.reference.trim(),
         invoiceId: invoice.id,
@@ -556,9 +596,11 @@ export class LocalSalesCycleStore {
         frozenRate: preview.rate.rateToUsd,
         frozenRateDate: preview.rate.date,
       };
-      return { ...state, payments: [payment, ...state.payments] };
-    });
-    return payment;
+      return {
+        state: { ...state, payments: [payment, ...state.payments] },
+        result: payment,
+      };
+    }) as Payment | undefined;
   }
 
   confirmPayment(paymentId: string): void {
@@ -579,14 +621,17 @@ export class LocalSalesCycleStore {
         return state;
       }
 
+      const allocated = this.allocateReference(state, 'PAG');
       const confirmedPayment: Payment = {
         ...payment,
         status: 'confirmed',
         confirmedAt: new Date().toISOString(),
+        documentReference: allocated.reference,
       };
       return this.withSettlementStatus(
         {
           ...state,
+          counters: allocated.counters,
           payments: state.payments.map((candidate) =>
             candidate.id === paymentId ? confirmedPayment : candidate,
           ),
@@ -623,10 +668,47 @@ export class LocalSalesCycleStore {
   private updateState(
     update: (state: SalesCycleState) => SalesCycleState,
   ): void {
-    const nextState = update(this.state());
-    if (nextState === this.state()) return;
-    this.state.set(nextState);
-    this.persist(nextState);
+    void this.mutate((state) => ({ state: update(state), result: undefined }));
+  }
+
+  /**
+   * Serializes same-origin writes with the Web Locks API. Environments without
+   * `navigator.locks` execute synchronously for deterministic tests, but do not
+   * receive a cross-tab serialization guarantee. This is the explicit seam a
+   * future Supabase repository will replace.
+   */
+  private mutate<T>(
+    mutation: (state: SalesCycleState) => MutationResult<T>,
+  ): T | Promise<T> {
+    const commit = (): T => {
+      const current = this.readState();
+      const mutationResult = mutation(current);
+      if (mutationResult.state === current) {
+        this.state.set(current);
+        return mutationResult.result;
+      }
+      const next = {
+        ...mutationResult.state,
+        revision: current.revision + 1,
+      };
+      this.state.set(next);
+      this.persist(next);
+      this.channel?.postMessage({ revision: next.revision });
+      return mutationResult.result;
+    };
+    const locks = this.locks();
+    return locks ? locks.request(LOCK_NAME, { mode: 'exclusive' }, commit) : commit();
+  }
+
+  private allocateReference(
+    state: SalesCycleState,
+    counter: DocumentCounter,
+  ): { reference: string; counters: DocumentCounters } {
+    const value = state.counters[counter] + 1;
+    return {
+      reference: `${counter}-${value.toString().padStart(6, '0')}`,
+      counters: { ...state.counters, [counter]: value },
+    };
   }
 
   private salesOrderId(): SalesOrderId {
@@ -651,15 +733,26 @@ export class LocalSalesCycleStore {
       );
       if (!invoice || !this.canTransitionInvoice(invoice.status, targetStatus))
         return state;
+      const allocated =
+        targetStatus === 'published'
+          ? this.allocateReference(state, 'FAC')
+          : undefined;
       return {
         ...state,
+        counters: allocated?.counters ?? state.counters,
         invoices: state.invoices.map((candidate) => {
           if (candidate.id !== invoiceId) return candidate;
           if (targetStatus !== 'published')
             return { ...candidate, status: targetStatus };
           return {
             ...candidate,
-            ...this.publicationSnapshot(state, candidate),
+            ...this.publicationSnapshot(
+              state,
+              candidate,
+              undefined,
+              allocated?.reference,
+            ),
+            reference: allocated?.reference ?? candidate.reference,
             status: targetStatus,
           };
         }),
@@ -842,6 +935,7 @@ export class LocalSalesCycleStore {
     state: SalesCycleState,
     invoice: Invoice,
     issueDate = new Date().toISOString().slice(0, 10),
+    documentNumber?: string,
   ): Pick<
     Invoice,
     | 'number'
@@ -865,7 +959,7 @@ export class LocalSalesCycleStore {
           )
         : undefined;
     return {
-      number: this.nextInvoiceNumber(state, issueDate),
+      number: documentNumber ?? this.nextInvoiceNumber(state, issueDate),
       issueDate,
       issuedCurrency: invoice.currency,
       vesFxRate: vesRate?.rateToUsd,
@@ -981,10 +1075,6 @@ export class LocalSalesCycleStore {
     }, new Map<ProductId, number>());
   }
 
-  private reference(prefix: string): string {
-    return `${prefix}-${new Date().getFullYear()}-${this.identifier().slice(-6).toUpperCase()}`;
-  }
-
   private identifier(): string {
     return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   }
@@ -1004,9 +1094,18 @@ export class LocalSalesCycleStore {
           : [this.defaultWarehouse(inventory)],
         inventory,
       );
+      const salesOrders = (state.salesOrders ?? []).map((order) => ({
+        ...order,
+        orderDate: order.orderDate ?? order.createdAt.slice(0, 10),
+        lines: (order.lines ?? []).map((line, index) => ({
+          ...line,
+          sourceLineId:
+            line.sourceLineId ?? `legacy:order:${order.id}:line:${index}`,
+        })),
+      }));
       const deliveries: Delivery[] = (state.deliveries ?? []).map(
         (delivery) => {
-          const order = state.salesOrders?.find(
+          const order = salesOrders.find(
             (candidate) => candidate.id === delivery.orderId,
           );
           const warehouse =
@@ -1021,26 +1120,40 @@ export class LocalSalesCycleStore {
               'Customer unavailable',
             warehouseId: warehouse.id,
             warehouseName: warehouse.name,
+            reference:
+              delivery.reference?.trim() || `legacy:delivery:${delivery.id}`,
+            lines: (delivery.lines ?? []).map((line, index) => ({
+              ...line,
+              sourceLineId:
+                line.sourceLineId ??
+                order?.lines.find(
+                  (orderLine) => orderLine.productId === line.productId,
+                )?.sourceLineId ??
+                `legacy:delivery:${delivery.id}:line:${index}`,
+            })),
           };
         },
       );
+      const invoices = this.migrateInvoices(
+        state.invoices ?? [],
+        deliveries,
+        state.exchangeRates ?? [],
+      );
       const migratedState = {
         ...state,
+        revision:
+          Number.isSafeInteger(state.revision) && (state.revision ?? -1) >= 0
+            ? state.revision
+            : 0,
+        counters: this.migrateCounters(state, invoices),
         inventory,
         warehouses,
-        salesOrders: (state.salesOrders ?? []).map((order) => ({
-          ...order,
-          orderDate: order.orderDate ?? order.createdAt.slice(0, 10),
-        })),
+        salesOrders,
         deliveries,
-        invoices: this.migrateInvoices(
-          state.invoices ?? [],
-          deliveries,
-          state.exchangeRates ?? [],
-        ),
+        invoices,
         payments: this.migratePayments(
           state.payments ?? [],
-          state.invoices ?? [],
+          invoices,
           state.exchangeRates ?? [],
         ),
         exchangeRates: state.exchangeRates ?? [],
@@ -1086,7 +1199,20 @@ export class LocalSalesCycleStore {
       const lines = (
         (invoice.lines ?? []) as Array<DocumentLine | InvoiceLine>
       ).flatMap((line) => {
-        if (this.isInvoiceLine(line)) return [line];
+        if (this.isInvoiceLine(line)) {
+          const delivery = deliveries.find(
+            (candidate) => candidate.id === line.deliveryId,
+          );
+          return [
+            {
+              ...line,
+              sourceLineId:
+                line.sourceLineId ??
+                delivery?.lines[line.deliveryLineIndex]?.sourceLineId ??
+                `legacy:invoice:${invoice.id}:line:${line.deliveryLineIndex}`,
+            },
+          ];
+        }
         let remaining = line.quantity;
         const allocated: InvoiceLine[] = [];
         const sources = deliveries.filter(
@@ -1131,6 +1257,8 @@ export class LocalSalesCycleStore {
           migrated,
           this.publicationSnapshot(
             {
+              revision: 0,
+              counters: { SO: 0, DES: 0, FAC: 0, PAG: 0 },
               salesOrders: [],
               deliveries,
               invoices: [...typedInvoices, ...migratedById.values()],
@@ -1243,6 +1371,39 @@ export class LocalSalesCycleStore {
     );
   }
 
+  private migrateCounters(
+    state: Partial<SalesCycleState>,
+    invoices: Invoice[],
+  ): DocumentCounters {
+    const legacyCounters = state.counters ?? { SO: 0, DES: 0, FAC: 0, PAG: 0 };
+    const references = [
+      ...(state.salesOrders ?? []).map((order) => order.reference),
+      ...(state.deliveries ?? []).map((delivery) => delivery.reference),
+      ...invoices.flatMap((invoice) => [invoice.reference, invoice.number]),
+      ...(state.payments ?? []).map((payment) => payment.documentReference),
+    ];
+    return (['SO', 'DES', 'FAC', 'PAG'] as const).reduce(
+      (counters, counter) => ({
+        ...counters,
+        [counter]: Math.max(
+          legacyCounters[counter] ?? 0,
+          ...references.map((reference) =>
+            this.referenceSequence(reference, counter),
+          ),
+        ),
+      }),
+      { SO: 0, DES: 0, FAC: 0, PAG: 0 },
+    );
+  }
+
+  private referenceSequence(
+    reference: string | undefined,
+    counter: DocumentCounter,
+  ): number {
+    const match = reference?.match(new RegExp(`^${counter}-(\\d{6})$`));
+    return match ? Number(match[1]) : 0;
+  }
+
   private seedState(): SalesCycleState {
     const inventory: InventoryItem[] = [
       {
@@ -1271,6 +1432,8 @@ export class LocalSalesCycleStore {
       },
     ];
     const state: SalesCycleState = {
+      revision: 0,
+      counters: { SO: 0, DES: 0, FAC: 0, PAG: 0 },
       salesOrders: [],
       deliveries: [],
       invoices: [],
@@ -1327,6 +1490,19 @@ export class LocalSalesCycleStore {
 
   private persist(state: SalesCycleState): void {
     this.storage()?.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  private refreshFromStorage(): void {
+    this.state.set(this.readState());
+  }
+
+  private createChannel(): BroadcastChannel | undefined {
+    if (typeof BroadcastChannel === 'undefined') return undefined;
+    return new BroadcastChannel(STORAGE_KEY);
+  }
+
+  private locks(): LockManager | undefined {
+    return typeof navigator === 'undefined' ? undefined : navigator.locks;
   }
 
   private storage(): Storage | undefined {

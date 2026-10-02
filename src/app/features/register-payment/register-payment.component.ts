@@ -39,8 +39,8 @@ export class RegisterPaymentComponent {
       !!this.preview() && this.reference.trim().length > 0 && !!this.method
     );
   }
-  protected createPayment(): void {
-    const payment = this.store.createPayment({
+  protected async createPayment(): Promise<void> {
+    const payment = await this.store.createPayment({
       invoiceId: this.invoice.id,
       currency: this.currency,
       amount: Number(this.amount),

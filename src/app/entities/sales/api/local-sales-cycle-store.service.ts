@@ -216,9 +216,7 @@ export class LocalSalesCycleStore {
     );
   }
 
-  invoiceEligibility(
-    orderId: SalesOrderId,
-  ):
+  invoiceEligibility(orderId: SalesOrderId):
     | {
         lines: DocumentLine[];
         deliveryIds: DeliveryId[];
@@ -235,6 +233,9 @@ export class LocalSalesCycleStore {
     lines: DocumentLine[];
   }): SalesOrder {
     return this.mutate((state) => {
+      if (!this.isValidSalesOrderInput(input)) {
+        return { state, result: undefined as unknown as SalesOrder };
+      }
       const allocated = this.allocateReference(state, 'SO');
       const order: SalesOrder = {
         id: this.salesOrderId(),
@@ -244,7 +245,8 @@ export class LocalSalesCycleStore {
         currency: input.currency,
         lines: input.lines.map((line, index) => ({
           ...line,
-          sourceLineId: line.sourceLineId ?? `order:${allocated.reference}:${index}`,
+          sourceLineId:
+            line.sourceLineId ?? `order:${allocated.reference}:${index}`,
           unitPrice: this.roundAmount(line.unitPrice),
         })),
         orderDate: input.orderDate ?? new Date().toISOString().slice(0, 10),
@@ -270,20 +272,22 @@ export class LocalSalesCycleStore {
   }): void {
     this.updateState((state) => ({
       ...state,
-      salesOrders: state.salesOrders.map((order) =>
-        order.id === input.id && order.status === 'draft'
-          ? {
-              ...order,
-              customerName: input.customerName.trim(),
-              currency: input.currency,
-              orderDate: input.orderDate,
-              lines: input.lines.map((line) => ({
-                ...line,
-                unitPrice: this.roundAmount(line.unitPrice),
-              })),
-            }
-          : order,
-      ),
+      salesOrders: !this.isValidSalesOrderInput(input)
+        ? state.salesOrders
+        : state.salesOrders.map((order) =>
+            order.id === input.id && order.status === 'draft'
+              ? {
+                  ...order,
+                  customerName: input.customerName.trim(),
+                  currency: input.currency,
+                  orderDate: input.orderDate,
+                  lines: input.lines.map((line) => ({
+                    ...line,
+                    unitPrice: this.roundAmount(line.unitPrice),
+                  })),
+                }
+              : order,
+          ),
     }));
   }
 
@@ -381,36 +385,50 @@ export class LocalSalesCycleStore {
       const warehouse = state.warehouses.find(
         (candidate) => candidate.id === delivery.warehouseId,
       );
-      const shippedByProduct = this.quantitiesByProduct(
-        shippedLines ?? delivery.lines,
+      const shipment = shippedLines ?? delivery.lines;
+      const shippedBySource = this.shippedQuantitiesBySource(
+        delivery,
+        shipment,
       );
-      const pendingByProduct = this.quantitiesByProduct(delivery.lines);
-      const hasValidQuantities = delivery.lines.every((line) => {
-        const shippedQuantity = shippedByProduct.get(line.productId) ?? 0;
-        const availableQuantity =
-          warehouse?.stock.find((item) => item.productId === line.productId)
-            ?.availableQuantity ?? 0;
+      if (!warehouse || !shippedBySource) return state;
+      const shippedByProduct = this.quantitiesByProduct(shipment);
+      const deliveredBySource = this.quantitiesBySource(
+        state.deliveries
+          .filter(
+            (candidate) =>
+              candidate.id !== delivery.id && candidate.status === 'validated',
+          )
+          .flatMap((candidate) => candidate.lines),
+      );
+      const order = state.salesOrders.find(
+        (candidate) => candidate.id === delivery.orderId,
+      );
+      const hasAvailableStock = [...shippedByProduct].every(
+        ([productId, quantity]) =>
+          quantity <=
+          (warehouse.stock.find((item) => item.productId === productId)
+            ?.availableQuantity ?? 0),
+      );
+      const respectsOrderSources = delivery.lines.every((line) => {
+        const sourceLine = order?.lines.find(
+          (candidate) => candidate.sourceLineId === line.sourceLineId,
+        );
+        const shippedQuantity = shippedBySource.get(line.sourceLineId!) ?? 0;
         return (
-          Number.isInteger(shippedQuantity) &&
-          shippedQuantity > 0 &&
-          shippedQuantity <= line.quantity &&
-          shippedQuantity <= availableQuantity
+          sourceLine?.productId === line.productId &&
+          (deliveredBySource.get(line.sourceLineId!) ?? 0) + shippedQuantity <=
+            sourceLine.quantity
         );
       });
-      if (
-        !warehouse ||
-        !hasValidQuantities ||
-        shippedByProduct.size !== pendingByProduct.size
-      )
-        return state;
+      if (!hasAvailableStock || !respectsOrderSources) return state;
 
       const validatedLines = delivery.lines.map((line) => ({
         ...line,
-        quantity: shippedByProduct.get(line.productId)!,
+        quantity: shippedBySource.get(line.sourceLineId!)!,
       }));
       const backorderLines = delivery.lines.flatMap((line) => {
         const pendingQuantity =
-          line.quantity - (shippedByProduct.get(line.productId) ?? 0);
+          line.quantity - (shippedBySource.get(line.sourceLineId!) ?? 0);
         return pendingQuantity > 0
           ? [{ ...line, quantity: pendingQuantity }]
           : [];
@@ -446,47 +464,27 @@ export class LocalSalesCycleStore {
       const deliveries = backorder
         ? [backorder, ...nextDeliveries]
         : nextDeliveries;
-      const deliveredByProduct = this.quantitiesByProduct(
-        deliveries
-          .filter(
-            (candidate) =>
-              candidate.orderId === delivery.orderId &&
-              candidate.status === 'validated',
-          )
-          .flatMap((candidate) => candidate.lines),
+      return this.recomputeSalesOrderCompletion(
+        {
+          ...state,
+          counters: backorderAllocation?.counters ?? state.counters,
+          deliveries,
+          warehouses: state.warehouses.map((candidate) =>
+            candidate.id !== warehouse.id
+              ? candidate
+              : {
+                  ...candidate,
+                  stock: candidate.stock.map((item) => ({
+                    ...item,
+                    availableQuantity:
+                      item.availableQuantity -
+                      (shippedByProduct.get(item.productId) ?? 0),
+                  })),
+                },
+          ),
+        },
+        delivery.orderId,
       );
-      const order = state.salesOrders.find(
-        (candidate) => candidate.id === delivery.orderId,
-      );
-      const isCompleted =
-        order?.lines.every(
-          (line) =>
-            (deliveredByProduct.get(line.productId) ?? 0) >= line.quantity,
-        ) ?? false;
-
-      return {
-        ...state,
-        counters: backorderAllocation?.counters ?? state.counters,
-        salesOrders: state.salesOrders.map((order) =>
-          order.id === delivery.orderId
-            ? { ...order, status: isCompleted ? 'completed' : 'confirmed' }
-            : order,
-        ),
-        deliveries,
-        warehouses: state.warehouses.map((candidate) =>
-          candidate.id !== warehouse.id
-            ? candidate
-            : {
-                ...candidate,
-                stock: candidate.stock.map((item) => ({
-                  ...item,
-                  availableQuantity:
-                    item.availableQuantity -
-                    (shippedByProduct.get(item.productId) ?? 0),
-                })),
-              },
-        ),
-      };
     });
   }
 
@@ -529,7 +527,10 @@ export class LocalSalesCycleStore {
         createdAt: new Date().toISOString(),
       };
       return {
-        state: { ...state, invoices: [createdInvoice, ...state.invoices] },
+        state: this.recomputeSalesOrderCompletion(
+          { ...state, invoices: [createdInvoice, ...state.invoices] },
+          orderId,
+        ),
         result: createdInvoice,
       };
     }) as Invoice | undefined;
@@ -561,7 +562,7 @@ export class LocalSalesCycleStore {
             state,
             invoice,
             input.currency,
-            input.amount,
+            this.roundAmount(input.amount),
             input.paymentDate,
             input.adjustedRate,
           )
@@ -572,7 +573,7 @@ export class LocalSalesCycleStore {
         this.invoiceBalanceForState(state, invoice) <= 0 ||
         !this.isValidPaymentInput(input) ||
         !preview ||
-        preview.convertedAmount > this.invoiceBalanceForState(state, invoice)
+        preview.convertedAmount > this.invoiceTotal(invoice) + 0.01
       ) {
         return { state, result: undefined };
       }
@@ -616,7 +617,8 @@ export class LocalSalesCycleStore {
         !invoice ||
         payment.status !== 'draft' ||
         !this.isPayableInvoice(invoice) ||
-        payment.convertedAmount > this.invoiceBalanceForState(state, invoice)
+        this.settledTotalForState(state, invoice.id) + payment.convertedAmount >
+          this.invoiceTotal(invoice) + 0.01
       ) {
         return state;
       }
@@ -628,15 +630,18 @@ export class LocalSalesCycleStore {
         confirmedAt: new Date().toISOString(),
         documentReference: allocated.reference,
       };
-      return this.withSettlementStatus(
-        {
-          ...state,
-          counters: allocated.counters,
-          payments: state.payments.map((candidate) =>
-            candidate.id === paymentId ? confirmedPayment : candidate,
-          ),
-        },
-        invoice.id,
+      return this.recomputeSalesOrderCompletion(
+        this.withSettlementStatus(
+          {
+            ...state,
+            counters: allocated.counters,
+            payments: state.payments.map((candidate) =>
+              candidate.id === paymentId ? confirmedPayment : candidate,
+            ),
+          },
+          invoice.id,
+        ),
+        invoice.orderId,
       );
     });
   }
@@ -651,7 +656,7 @@ export class LocalSalesCycleStore {
         (payment.status !== 'draft' && payment.status !== 'confirmed')
       )
         return state;
-      return this.withSettlementStatus(
+      const nextState = this.withSettlementStatus(
         {
           ...state,
           payments: state.payments.map((candidate) =>
@@ -662,6 +667,12 @@ export class LocalSalesCycleStore {
         },
         payment.invoiceId,
       );
+      const invoice = nextState.invoices.find(
+        (candidate) => candidate.id === payment.invoiceId,
+      );
+      return invoice
+        ? this.recomputeSalesOrderCompletion(nextState, invoice.orderId)
+        : nextState;
     });
   }
 
@@ -697,7 +708,9 @@ export class LocalSalesCycleStore {
       return mutationResult.result;
     };
     const locks = this.locks();
-    return locks ? locks.request(LOCK_NAME, { mode: 'exclusive' }, commit) : commit();
+    return locks
+      ? locks.request(LOCK_NAME, { mode: 'exclusive' }, commit)
+      : commit();
   }
 
   private allocateReference(
@@ -738,24 +751,29 @@ export class LocalSalesCycleStore {
           ? this.allocateReference(state, 'FAC')
           : undefined;
       return {
-        ...state,
-        counters: allocated?.counters ?? state.counters,
-        invoices: state.invoices.map((candidate) => {
-          if (candidate.id !== invoiceId) return candidate;
-          if (targetStatus !== 'published')
-            return { ...candidate, status: targetStatus };
-          return {
-            ...candidate,
-            ...this.publicationSnapshot(
-              state,
-              candidate,
-              undefined,
-              allocated?.reference,
-            ),
-            reference: allocated?.reference ?? candidate.reference,
-            status: targetStatus,
-          };
-        }),
+        ...this.recomputeSalesOrderCompletion(
+          {
+            ...state,
+            counters: allocated?.counters ?? state.counters,
+            invoices: state.invoices.map((candidate) => {
+              if (candidate.id !== invoiceId) return candidate;
+              if (targetStatus !== 'published')
+                return { ...candidate, status: targetStatus };
+              return {
+                ...candidate,
+                ...this.publicationSnapshot(
+                  state,
+                  candidate,
+                  undefined,
+                  allocated?.reference,
+                ),
+                reference: allocated?.reference ?? candidate.reference,
+                status: targetStatus,
+              };
+            }),
+          },
+          invoice.orderId,
+        ),
       };
     });
   }
@@ -793,7 +811,7 @@ export class LocalSalesCycleStore {
       ['USD', 'VES', 'EUR'].includes(input.currency) &&
       Number.isFinite(input.amount) &&
       input.amount > 0 &&
-      /^\d{4}-\d{2}-\d{2}$/.test(input.paymentDate) &&
+      this.isValidDate(input.paymentDate) &&
       ['cash', 'bank transfer', 'mobile payment', 'zelle'].includes(
         input.method,
       ) &&
@@ -801,6 +819,126 @@ export class LocalSalesCycleStore {
       (input.adjustedRate === undefined ||
         (Number.isFinite(input.adjustedRate) && input.adjustedRate > 0))
     );
+  }
+
+  private isValidSalesOrderInput(input: {
+    customerName: string;
+    currency: CurrencyCode;
+    orderDate?: string;
+    lines: DocumentLine[];
+  }): boolean {
+    return (
+      typeof input.customerName === 'string' &&
+      input.customerName.trim().length > 0 &&
+      ['USD', 'VES', 'EUR'].includes(input.currency) &&
+      (input.orderDate === undefined || this.isValidDate(input.orderDate)) &&
+      Array.isArray(input.lines) &&
+      input.lines.every(
+        (line) =>
+          typeof line.productId === 'string' &&
+          typeof line.description === 'string' &&
+          line.description.trim().length > 0 &&
+          Number.isInteger(line.quantity) &&
+          line.quantity > 0 &&
+          Number.isFinite(line.unitPrice) &&
+          line.unitPrice >= 0,
+      )
+    );
+  }
+
+  private isValidDate(date: string): boolean {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+    const parsed = new Date(`${date}T00:00:00.000Z`);
+    return (
+      !Number.isNaN(parsed.valueOf()) &&
+      parsed.toISOString().slice(0, 10) === date
+    );
+  }
+
+  private shippedQuantitiesBySource(
+    delivery: Delivery,
+    shipment: DocumentLine[],
+  ): Map<string, number> | undefined {
+    if (shipment.length !== delivery.lines.length) return undefined;
+    const expected = new Map(
+      delivery.lines.map((line) => [line.sourceLineId, line]),
+    );
+    const shipped = new Map<string, number>();
+    for (const line of shipment) {
+      const expectedLine = expected.get(line.sourceLineId);
+      if (
+        !line.sourceLineId ||
+        !expectedLine ||
+        shipped.has(line.sourceLineId) ||
+        line.productId !== expectedLine.productId ||
+        !Number.isInteger(line.quantity) ||
+        line.quantity <= 0 ||
+        line.quantity > expectedLine.quantity
+      )
+        return undefined;
+      shipped.set(line.sourceLineId, line.quantity);
+    }
+    return shipped.size === expected.size ? shipped : undefined;
+  }
+
+  private quantitiesBySource(lines: DocumentLine[]): Map<string, number> {
+    return lines.reduce((quantities, line) => {
+      if (!line.sourceLineId) return quantities;
+      quantities.set(
+        line.sourceLineId,
+        (quantities.get(line.sourceLineId) ?? 0) + line.quantity,
+      );
+      return quantities;
+    }, new Map<string, number>());
+  }
+
+  private recomputeSalesOrderCompletion(
+    state: SalesCycleState,
+    orderId: SalesOrderId,
+  ): SalesCycleState {
+    const order = state.salesOrders.find(
+      (candidate) => candidate.id === orderId,
+    );
+    if (!order || order.status === 'draft' || order.status === 'cancelled')
+      return state;
+    const deliveredBySource = this.quantitiesBySource(
+      state.deliveries
+        .filter(
+          (delivery) =>
+            delivery.orderId === orderId && delivery.status === 'validated',
+        )
+        .flatMap((delivery) => delivery.lines),
+    );
+    const invoicedBySource = this.quantitiesBySource(
+      state.invoices
+        .filter(
+          (invoice) =>
+            invoice.orderId === orderId && invoice.status !== 'voided',
+        )
+        .flatMap((invoice) => invoice.lines),
+    );
+    const nonVoidedInvoices = state.invoices.filter(
+      (invoice) => invoice.orderId === orderId && invoice.status !== 'voided',
+    );
+    const completed =
+      order.lines.length > 0 &&
+      order.lines.every(
+        (line) =>
+          (deliveredBySource.get(line.sourceLineId ?? '') ?? 0) ===
+            line.quantity &&
+          (invoicedBySource.get(line.sourceLineId ?? '') ?? 0) ===
+            line.quantity,
+      ) &&
+      nonVoidedInvoices.length > 0 &&
+      nonVoidedInvoices.every((invoice) => invoice.status === 'paid');
+    return {
+      ...state,
+      salesOrders: state.salesOrders.map((candidate) =>
+        candidate.id === orderId
+          ? { ...candidate, status: completed ? 'completed' : 'confirmed' }
+          : candidate,
+      ),
+    };
   }
 
   private canCancelSalesOrderForState(
@@ -893,7 +1031,7 @@ export class LocalSalesCycleStore {
       return state;
     const balance = this.invoiceBalanceForState(state, invoice);
     const status: InvoiceStatus =
-      balance <= 0
+      balance <= 0.01
         ? 'paid'
         : balance < this.invoiceTotal(invoice)
           ? 'partial'

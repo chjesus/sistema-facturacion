@@ -101,9 +101,13 @@ The base project is an uncustomized Angular starter. Users need four connected v
       defensive legacy line-provenance migration. Checks: `npm run format:check`,
       `npm run lint`, `npm test -- --watch=false` (20 files, 51 tests), `npm run
       build`, and `git diff --check` passed. Commit: `b153183`.
-- [ ] SC-23 — Enforce delivery, invoicing, payment, FX, immutable-transition, and
-      order-completion invariants. Route: delegated; trigger: multi-file
-      implementation. Checks: format, lint, test, build. Evidence: pending.
+- [x] SC-23 — Enforced latest-state delivery source/stock limits, non-voided
+       invoice-line reservations, confirmed-payment settlement ceilings, immutable
+       document content, and paid-invoice order completion. Draft payments do not
+       reserve settlement capacity; confirmation atomically applies the 0.01
+       tolerance. Checks: `npm run format:check`, `npm run lint`, `npm test --
+       --watch=false` (20 files, 54 tests), `npm run build` (264.64 kB initial),
+       and `git diff --check` passed. Commit: pending.
 - [ ] SC-24 — Add deterministic invariant/concurrency test coverage and document
       local-only guarantees. Route: delegated; trigger: multi-file verification.
       Checks: format, lint, test, build. Evidence: pending.

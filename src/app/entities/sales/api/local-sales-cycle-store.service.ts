@@ -13,6 +13,7 @@ import {
   MonetaryTotals,
   OrderLineQuantities,
   Payment,
+  PaymentMethod,
   ProductId,
   SalesOrder,
   SalesOrderId,
@@ -26,6 +27,13 @@ interface SalesCycleState {
   inventory: InventoryItem[];
   warehouses: Warehouse[];
   exchangeRates: ExchangeRate[];
+}
+
+export interface PaymentPreview {
+  rate: ExchangeRate;
+  invoiceRate: ExchangeRate;
+  rateSource: 'history' | 'adjusted';
+  convertedAmount: number;
 }
 
 const STORAGE_KEY = 'sales-cycle-state-v1';
@@ -105,13 +113,8 @@ export class LocalSalesCycleStore {
     return this.roundAmount(this.invoiceTotal(invoice) - this.invoiceSettledTotal(invoice.id));
   }
 
-  paymentPreview(invoice: Invoice, currency: CurrencyCode, amount: number): {
-    rate: ExchangeRate;
-    convertedAmount: number;
-  } | undefined {
-    const rate = this.latestRate(currency);
-    if (!rate || !Number.isFinite(amount) || amount <= 0) return undefined;
-    return { rate, convertedAmount: this.convertToInvoiceCurrency(amount, rate, invoice.currency) };
+  paymentPreview(invoice: Invoice, currency: CurrencyCode, amount: number, paymentDate: string, adjustedRate?: number): PaymentPreview | undefined {
+    return this.paymentPreviewForState(this.state(), invoice, currency, amount, paymentDate, adjustedRate);
   }
 
   invoiceEligibility(orderId: SalesOrderId): { lines: DocumentLine[]; deliveryIds: DeliveryId[]; deliveryReferences: string[] } | undefined {
@@ -303,23 +306,33 @@ export class LocalSalesCycleStore {
     this.transitionInvoice(invoiceId, 'voided');
   }
 
-  createPayment(input: { invoiceId: InvoiceId; currency: CurrencyCode; amount: number }): Payment | undefined {
+  createPayment(input: { invoiceId: InvoiceId; currency: CurrencyCode; amount: number; paymentDate: string; method: PaymentMethod; reference: string; adjustedRate?: number }): Payment | undefined {
     let payment: Payment | undefined;
     this.updateState((state) => {
       const invoice = state.invoices.find((candidate) => candidate.id === input.invoiceId);
-      const preview = invoice ? this.paymentPreviewForState(state, invoice, input.currency, input.amount) : undefined;
-      if (!invoice || !this.isPayableInvoice(invoice) || !preview || preview.convertedAmount > this.invoiceBalanceForState(state, invoice)) {
+      const preview = invoice ? this.paymentPreviewForState(state, invoice, input.currency, input.amount, input.paymentDate, input.adjustedRate) : undefined;
+      if (!invoice || !this.isPayableInvoice(invoice) || this.invoiceBalanceForState(state, invoice) <= 0 || !this.isValidPaymentInput(input) || !preview || preview.convertedAmount > this.invoiceBalanceForState(state, invoice)) {
         return state;
       }
 
       payment = {
         id: `payment-${this.identifier()}`,
-        reference: this.reference('PAY'),
+        reference: input.reference.trim(),
         invoiceId: invoice.id,
         invoiceReference: invoice.number ?? invoice.reference,
         status: 'draft',
         currency: input.currency,
         amount: this.roundAmount(input.amount),
+        paymentDate: input.paymentDate,
+        method: input.method,
+        rateSource: preview.rateSource,
+        chosenRate: preview.rate.rateToUsd,
+        rateDate: preview.rate.date,
+        invoiceRate: preview.invoiceRate.rateToUsd,
+        invoiceRateDate: preview.invoiceRate.date,
+        convertedAmount: preview.convertedAmount,
+        frozenRate: preview.rate.rateToUsd,
+        frozenRateDate: preview.rate.date,
       };
       return { ...state, payments: [payment, ...state.payments] };
     });
@@ -330,17 +343,13 @@ export class LocalSalesCycleStore {
     this.updateState((state) => {
       const payment = state.payments.find((candidate) => candidate.id === paymentId);
       const invoice = payment ? state.invoices.find((candidate) => candidate.id === payment.invoiceId) : undefined;
-      const preview = payment && invoice ? this.paymentPreviewForState(state, invoice, payment.currency, payment.amount) : undefined;
-      if (!payment || !invoice || payment.status !== 'draft' || !this.isPayableInvoice(invoice) || !preview || preview.convertedAmount > this.invoiceBalanceForState(state, invoice)) {
+      if (!payment || !invoice || payment.status !== 'draft' || !this.isPayableInvoice(invoice) || payment.convertedAmount > this.invoiceBalanceForState(state, invoice)) {
         return state;
       }
 
       const confirmedPayment: Payment = {
         ...payment,
         status: 'confirmed',
-        convertedAmount: preview.convertedAmount,
-        frozenRate: preview.rate.rateToUsd,
-        frozenRateDate: preview.rate.date,
         confirmedAt: new Date().toISOString(),
       };
       return this.withSettlementStatus({
@@ -408,6 +417,15 @@ export class LocalSalesCycleStore {
     return invoice.status === 'published' || invoice.status === 'partial';
   }
 
+  private isValidPaymentInput(input: { currency: CurrencyCode; amount: number; paymentDate: string; method: PaymentMethod; reference: string; adjustedRate?: number }): boolean {
+    return ['USD', 'VES', 'EUR'].includes(input.currency)
+      && Number.isFinite(input.amount) && input.amount > 0
+      && /^\d{4}-\d{2}-\d{2}$/.test(input.paymentDate)
+      && ['cash', 'bank transfer', 'mobile payment', 'zelle'].includes(input.method)
+      && input.reference.trim().length > 0
+      && (input.adjustedRate === undefined || (Number.isFinite(input.adjustedRate) && input.adjustedRate > 0));
+  }
+
   private canCancelSalesOrderForState(state: SalesCycleState, order: SalesOrder): boolean {
     if (order.status !== 'draft' && order.status !== 'confirmed') return false;
     const hasValidatedDelivery = state.deliveries.some((delivery) => delivery.orderId === order.id && delivery.status === 'validated');
@@ -422,25 +440,19 @@ export class LocalSalesCycleStore {
     invoice: Invoice,
     currency: CurrencyCode,
     amount: number,
-  ): { rate: ExchangeRate; convertedAmount: number } | undefined {
-    const rate = state.exchangeRates
-      .filter((candidate) => candidate.currency === currency)
-      .sort((a, b) => b.date.localeCompare(a.date))[0];
-    if (!rate || !Number.isFinite(amount) || amount <= 0) return undefined;
-    return { rate, convertedAmount: this.convertToInvoiceCurrency(amount, rate, invoice.currency, state) };
-  }
-
-  private convertToInvoiceCurrency(
-    amount: number,
-    paymentRate: ExchangeRate,
-    invoiceCurrency: CurrencyCode,
-    state = this.state(),
-  ): number {
-    const invoiceRate = state.exchangeRates
-      .filter((candidate) => candidate.currency === invoiceCurrency)
-      .sort((a, b) => b.date.localeCompare(a.date))[0];
-    if (!invoiceRate) return 0;
-    return this.roundAmount((amount / paymentRate.rateToUsd) * invoiceRate.rateToUsd);
+    paymentDate: string,
+    adjustedRate?: number,
+  ): PaymentPreview | undefined {
+    const historyRate = this.latestRateOnOrBefore(state, currency, paymentDate);
+    const invoiceRate = this.latestRateOnOrBefore(state, invoice.currency, paymentDate);
+    if (!historyRate || !invoiceRate || !Number.isFinite(amount) || amount <= 0 || (adjustedRate !== undefined && (!Number.isFinite(adjustedRate) || adjustedRate <= 0))) return undefined;
+    const rate = adjustedRate === undefined ? historyRate : { ...historyRate, rateToUsd: adjustedRate };
+    return {
+      rate,
+      invoiceRate,
+      rateSource: adjustedRate === undefined ? 'history' : 'adjusted',
+      convertedAmount: this.roundAmount((amount / rate.rateToUsd) * invoiceRate.rateToUsd),
+    };
   }
 
   private settledTotalForState(state: SalesCycleState, invoiceId: InvoiceId): number {
@@ -589,7 +601,7 @@ export class LocalSalesCycleStore {
         salesOrders: (state.salesOrders ?? []).map((order) => ({ ...order, orderDate: order.orderDate ?? order.createdAt.slice(0, 10) })),
         deliveries,
         invoices: this.migrateInvoices(state.invoices ?? [], deliveries, state.exchangeRates ?? []),
-        payments: state.payments ?? [],
+        payments: this.migratePayments(state.payments ?? [], state.invoices ?? [], state.exchangeRates ?? []),
         exchangeRates: state.exchangeRates ?? [],
       } as SalesCycleState;
       this.persist(migratedState);
@@ -650,6 +662,35 @@ export class LocalSalesCycleStore {
       migratedById.set(migrated.id, migrated);
     });
     return typedInvoices.map((invoice) => migratedById.get(invoice.id)!);
+  }
+
+  private migratePayments(payments: unknown[], invoices: Invoice[], exchangeRates: ExchangeRate[]): Payment[] {
+    return (payments as Partial<Payment>[]).flatMap((payment) => {
+      const invoice = invoices.find((candidate) => candidate.id === payment.invoiceId);
+      const paymentDate = payment.paymentDate ?? payment.confirmedAt?.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
+      const currency = payment.currency;
+      if (!invoice || !currency || !['USD', 'VES', 'EUR'].includes(currency) || !Number.isFinite(payment.amount) || (payment.amount ?? 0) <= 0) return [];
+      const paymentRate = this.latestRateOnOrBefore({ exchangeRates } as SalesCycleState, currency, paymentDate);
+      const invoiceRate = this.latestRateOnOrBefore({ exchangeRates } as SalesCycleState, invoice.currency, paymentDate);
+      const chosenRate = payment.chosenRate ?? payment.frozenRate ?? paymentRate?.rateToUsd ?? 1;
+      const normalizedMethod: PaymentMethod = ['cash', 'bank transfer', 'mobile payment', 'zelle'].includes(payment.method ?? '')
+        ? payment.method as PaymentMethod
+        : 'bank transfer';
+      return [{
+        ...payment,
+        reference: payment.reference?.trim() || `Legacy ${payment.id ?? 'payment'}`,
+        paymentDate,
+        method: normalizedMethod,
+        rateSource: payment.rateSource ?? 'history',
+        chosenRate,
+        rateDate: payment.rateDate ?? payment.frozenRateDate ?? paymentRate?.date ?? paymentDate,
+        invoiceRate: payment.invoiceRate ?? invoiceRate?.rateToUsd ?? 1,
+        invoiceRateDate: payment.invoiceRateDate ?? invoiceRate?.date ?? paymentDate,
+        convertedAmount: payment.convertedAmount ?? this.roundAmount(((payment.amount ?? 0) / chosenRate) * (invoiceRate?.rateToUsd ?? 1)),
+        frozenRate: payment.frozenRate ?? chosenRate,
+        frozenRateDate: payment.frozenRateDate ?? payment.rateDate ?? paymentRate?.date,
+      } as Payment];
+    });
   }
 
   private isInvoiceLine(line: DocumentLine | InvoiceLine): line is InvoiceLine {

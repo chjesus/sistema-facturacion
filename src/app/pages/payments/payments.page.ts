@@ -2,49 +2,61 @@ import { Component, computed, inject, signal } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { FormsModule } from '@angular/forms';
 import { LocalSalesCycleStore } from '../../entities/sales/api/local-sales-cycle-store.service';
-import { CurrencyCode, Invoice, InvoiceId, Payment } from '../../entities/sales/model/sales.models';
-
-const pageStyles = `
-  .page-header { max-width: 620px; } .eyebrow { color: var(--accent); font-size: .75rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; } h1 { font-size: clamp(2.2rem, 6vw, 4rem); letter-spacing: -.06em; line-height: 1; margin: .5rem 0 1rem; } p, .meta { color: var(--muted); line-height: 1.6; } .workspace { display: grid; gap: 1.25rem; grid-template-columns: minmax(270px, .85fr) minmax(0, 1.15fr); margin-top: 2.5rem; } .panel, .payment, .empty { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 1.25rem; } .form, .payment-list { display: grid; gap: .85rem; } label { color: var(--muted); display: grid; font-size: .8rem; font-weight: 700; gap: .35rem; } select, input { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: inherit; font: inherit; padding: .7rem; } .payment { cursor: pointer; text-align: left; width: 100%; } .payment.selected { border-color: var(--accent); box-shadow: 0 0 0 3px #eef2ff; } .top, .actions, .row { align-items: center; display: flex; gap: .7rem; justify-content: space-between; } .reference { font-size: .8rem; font-weight: 800; letter-spacing: .06em; } .status { border-radius: 999px; font-size: .75rem; font-weight: 800; padding: .35rem .65rem; text-transform: capitalize; } .draft { background: #fff7e6; color: #9a6700; } .confirmed { background: #e8f5ed; color: #1a7f37; } .voided { background: #fef3f2; color: #b42318; } .detail { display: grid; gap: .9rem; } .fact { background: var(--surface-muted); border-radius: 10px; padding: .85rem 1rem; } .fact strong { display: block; margin-bottom: .25rem; } .danger { color: #b42318; } @media (max-width: 760px) { .workspace { grid-template-columns: 1fr; } }
-`;
+import { CurrencyCode, InvoiceId, Payment, PaymentMethod } from '../../entities/sales/model/sales.models';
 
 @Component({
   selector: 'app-payments-page',
   imports: [FormsModule],
   template: `
-    <section class="page-header"><p class="eyebrow">Settlement workspace</p><h1>Payments</h1><p>Settle published invoices with locally recorded USD, VES, or EUR rates.</p></section>
-    <section class="workspace"><section class="panel"><h2>New payment</h2><form class="form" (ngSubmit)="createPayment()"><label>Invoice<select name="invoice" [(ngModel)]="invoiceId"><option value="">Select a published invoice</option>@for (invoice of payableInvoices(); track invoice.id) { <option [value]="invoice.id">{{ invoice.reference }} · {{ money(store.invoiceBalance(invoice), invoice.currency) }} remaining</option> }</select></label><label>Payment currency<select name="currency" [(ngModel)]="currency"><option value="USD">USD</option><option value="VES">VES</option><option value="EUR">EUR</option></select></label><label>Amount<input name="amount" type="number" min="0.01" step="0.01" [(ngModel)]="amount"></label>@if (preview(); as conversion) { <div class="fact"><strong>{{ money(amount, currency) }} → {{ money(conversion.convertedAmount, selectedInvoice()?.currency ?? 'USD') }}</strong><span class="meta">Latest rate: {{ conversion.rate.rateToUsd }} {{ currency }}/USD · {{ conversion.rate.date }}</span></div> }<button type="submit" [disabled]="!preview()">Create draft</button></form></section><section class="payment-list" aria-label="Payment list">@for (payment of store.payments(); track payment.id) { <button type="button" class="payment" [class.selected]="payment.id === selectedPaymentId()" (click)="selectPayment(payment.id)"><span class="top"><span class="reference">{{ payment.reference }}</span><span class="status" [class]="payment.status">{{ payment.status }}</span></span><span class="meta">{{ payment.invoiceReference }} · {{ money(payment.amount, payment.currency) }}</span></button> } @empty { <div class="empty"><h2>No payments yet</h2><p>Publish an invoice before creating its payment.</p></div> }</section><section class="panel detail">@if (selectedPayment(); as payment) { <div class="top"><div><span class="reference">{{ payment.reference }}</span><h2>Payment detail</h2></div><span class="status" [class]="payment.status">{{ payment.status }}</span></div><div class="fact"><strong>Source invoice · {{ payment.invoiceReference }}</strong><span class="meta">Invoice currency · {{ invoiceFor(payment)?.currency }} · Remaining · {{ money(invoiceFor(payment) ? store.invoiceBalance(invoiceFor(payment)!) : 0, invoiceFor(payment)?.currency ?? 'USD') }}</span></div><div class="row"><span>Payment</span><strong>{{ money(payment.amount, payment.currency) }}</strong></div><div class="row"><span>Conversion</span><strong>{{ payment.convertedAmount !== undefined ? money(payment.convertedAmount, invoiceFor(payment)?.currency ?? 'USD') : previewFor(payment)?.convertedAmount ? money(previewFor(payment)!.convertedAmount, invoiceFor(payment)?.currency ?? 'USD') : 'Unavailable' }}</strong></div><div class="fact"><strong>Rate · {{ payment.frozenRate ?? previewFor(payment)?.rate?.rateToUsd ?? 'Unavailable' }} {{ payment.currency }}/USD</strong><span class="meta">Rate date · {{ payment.frozenRateDate ?? previewFor(payment)?.rate?.date ?? 'Unavailable' }}{{ payment.frozenRate ? ' · Frozen on confirmation' : ' · Latest local history' }}</span></div>@if (payment.status === 'draft') { <div class="actions"><button type="button" (click)="confirmPayment(payment.id)">Confirm payment</button><button type="button" class="secondary danger" (click)="voidPayment(payment.id)">Void payment</button></div> } @else if (payment.status === 'confirmed') { <button type="button" class="secondary danger" (click)="voidPayment(payment.id)">Void payment</button> } } @else { <div class="empty"><h2>Select a payment</h2><p>Draft payments show the latest local rate until confirmation freezes it.</p></div> }</section></section>
+    <section class="page-header"><p class="eyebrow">Settlement workspace</p><h1>Register payment</h1><p>Record a dated payment against the invoice that opened this workspace.</p></section>
+    @if (selectedInvoice(); as invoice) {
+      <section class="invoice-card"><span class="eyebrow">Selected invoice</span><h2>{{ invoice.number ?? invoice.reference }}</h2><p>{{ invoice.orderReference }} · {{ money(store.invoiceBalance(invoice), invoice.currency) }} remaining</p></section>
+      <section class="workspace">
+        <form class="panel form" (ngSubmit)="createPayment()">
+          <h2>Payment details</h2>
+          <label>Date<input name="paymentDate" type="date" required [(ngModel)]="paymentDate"></label>
+          <label>Currency<select name="currency" required [(ngModel)]="currency"><option value="USD">USD</option><option value="VES">VES</option><option value="EUR">EUR</option></select></label>
+          <label>Amount<input name="amount" type="number" min="0.01" step="0.01" required [(ngModel)]="amount"></label>
+          <label>Method<select name="method" required [(ngModel)]="method"><option value="cash">Cash</option><option value="bank transfer">Bank transfer</option><option value="mobile payment">Mobile payment</option><option value="zelle">Zelle</option></select></label>
+          <label>Reference<input name="reference" required [(ngModel)]="reference" placeholder="Bank or receipt reference"></label>
+          <label>Rate adjustment (optional)<input name="adjustedRate" type="number" min="0.0001" step="0.0001" [(ngModel)]="adjustedRate" placeholder="Use historical rate"></label>
+          @if (preview(); as conversion) { <div class="preview"><strong>{{ money(amount, currency) }} → {{ money(conversion.convertedAmount, invoice.currency) }}</strong><span>Payment rate {{ conversion.rate.rateToUsd }} ({{ conversion.rateSource }}, {{ conversion.rate.date }})</span><span>Invoice rate {{ conversion.invoiceRate.rateToUsd }} ({{ conversion.invoiceRate.date }})</span></div> } @else { <p class="error">Enter valid values and choose a date with rates available for both currencies.</p> }
+          <button type="submit" [disabled]="!canCreate()">Create draft</button>
+        </form>
+        <section class="panel"><h2>Payment history</h2><div class="history">@for (payment of invoicePayments(); track payment.id) { <article><div><strong>{{ payment.reference }}</strong><span class="status">{{ payment.status }}</span></div><p>{{ money(payment.amount, payment.currency) }} · {{ payment.paymentDate }} · {{ payment.method }}</p><p>Frozen {{ payment.chosenRate }} ({{ payment.rateSource }}, {{ payment.rateDate }}) → {{ money(payment.convertedAmount, invoice.currency) }}</p>@if (payment.status === 'draft') { <button type="button" (click)="confirmPayment(payment.id)">Confirm</button> } @if (payment.status !== 'voided') { <button type="button" class="secondary" (click)="voidPayment(payment.id)">Void</button> }</article> } @empty { <p>No payments recorded for this invoice.</p> }</div></section>
+      </section>
+    } @else { <section class="panel"><h2>Invoice required</h2><p>Open Register Payment from a published or partial invoice with a positive balance.</p></section> }
   `,
-  styles: [pageStyles],
+  styles: [`
+    .page-header,.invoice-card,.workspace { max-width: 960px; margin-inline: auto; } .eyebrow { color: var(--accent); font-size:.75rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; } h1 { font-size:clamp(2.2rem,6vw,4rem); letter-spacing:-.06em; margin:.5rem 0 1rem; } h2 { margin:0 0 1rem; } p { color:var(--muted); } .invoice-card,.panel { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:1.25rem; } .invoice-card { margin-top:2rem; } .workspace { display:grid; gap:1.25rem; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:1.25rem; } .form,.history { display:grid; gap:.85rem; } label { color:var(--muted); display:grid; font-size:.8rem; font-weight:700; gap:.35rem; } input,select { background:var(--surface); border:1px solid var(--border); border-radius:8px; color:inherit; font:inherit; padding:.7rem; } .preview { background:var(--surface-muted); border-radius:10px; display:grid; gap:.3rem; padding:1rem; } .preview span { color:var(--muted); font-size:.85rem; } .history article { border-top:1px solid var(--border); padding:.9rem 0; } .history article div { display:flex; justify-content:space-between; } .history p { font-size:.85rem; margin:.35rem 0; } .status { text-transform:capitalize; } .error { color:#b42318; } .secondary { margin-left:.5rem; } @media(max-width:760px){.workspace{grid-template-columns:1fr}}`],
 })
 export class PaymentsPage {
   protected readonly store = inject(LocalSalesCycleStore);
   private readonly route = inject(ActivatedRoute);
-  protected readonly selectedPaymentId = signal<string | undefined>(this.store.payments()[0]?.id);
-  protected readonly selectedPayment = computed(() => this.store.payments().find((payment) => payment.id === this.selectedPaymentId()));
-  protected readonly payableInvoices = computed(() => this.store.invoices().filter((invoice) => invoice.status === 'published' || invoice.status === 'partial'));
-  protected invoiceId = this.preselectedInvoiceId();
+  protected readonly invoiceId = this.route.snapshot.queryParamMap.get('invoiceId') as InvoiceId | null;
+  protected readonly selectedInvoice = computed(() => {
+    const invoice = this.store.invoices().find((candidate) => candidate.id === this.invoiceId);
+    return invoice && (invoice.status === 'published' || invoice.status === 'partial') && this.store.invoiceBalance(invoice) > 0 ? invoice : undefined;
+  });
+  protected readonly invoicePayments = computed(() => this.store.payments().filter((payment) => payment.invoiceId === this.invoiceId));
+  protected paymentDate = new Date().toISOString().slice(0, 10);
   protected currency: CurrencyCode = 'USD';
   protected amount = 0;
+  protected method: PaymentMethod = 'bank transfer';
+  protected reference = '';
+  protected adjustedRate: number | null = null;
 
-  protected readonly selectedInvoice = computed(() => this.store.invoices().find((invoice) => invoice.id === this.invoiceId));
-  protected readonly preview = computed(() => {
+  protected preview() {
     const invoice = this.selectedInvoice();
-    return invoice ? this.store.paymentPreview(invoice, this.currency, Number(this.amount)) : undefined;
-  });
-
-  protected createPayment(): void {
-    const payment = this.store.createPayment({ invoiceId: this.invoiceId as InvoiceId, currency: this.currency, amount: Number(this.amount) });
-    if (payment) this.selectedPaymentId.set(payment.id);
+    return invoice ? this.store.paymentPreview(invoice, this.currency, Number(this.amount), this.paymentDate, this.adjustedRate ?? undefined) : undefined;
   }
-  protected selectPayment(paymentId: string): void { this.selectedPaymentId.set(paymentId); }
+  protected canCreate(): boolean { return !!this.preview() && this.reference.trim().length > 0 && !!this.method; }
+  protected createPayment(): void {
+    if (!this.invoiceId) return;
+    const payment = this.store.createPayment({ invoiceId: this.invoiceId, currency: this.currency, amount: Number(this.amount), paymentDate: this.paymentDate, method: this.method, reference: this.reference, adjustedRate: this.adjustedRate ?? undefined });
+    if (payment) this.reference = '';
+  }
   protected confirmPayment(paymentId: string): void { this.store.confirmPayment(paymentId); }
   protected voidPayment(paymentId: string): void { this.store.voidPayment(paymentId); }
-  protected invoiceFor(payment: Payment): Invoice | undefined { return this.store.invoices().find((invoice) => invoice.id === payment.invoiceId); }
-  protected previewFor(payment: Payment) { const invoice = this.invoiceFor(payment); return invoice ? this.store.paymentPreview(invoice, payment.currency, payment.amount) : undefined; }
   protected money(amount: number, currency: CurrencyCode): string { return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount); }
-  private preselectedInvoiceId(): string {
-    const invoiceId = this.route.snapshot.queryParamMap.get('invoiceId') as InvoiceId | null;
-    return invoiceId && this.payableInvoices().some((invoice) => invoice.id === invoiceId && this.store.invoiceBalance(invoice) > 0) ? invoiceId : '';
-  }
 }

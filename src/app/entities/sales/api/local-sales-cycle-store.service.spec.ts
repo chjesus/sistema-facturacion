@@ -269,13 +269,13 @@ describe('LocalSalesCycleStore', () => {
   it('settles an invoice partially and then in full', () => {
     const invoice = publishedInvoice('USD', 100);
 
-    const firstPayment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 40 })!;
+    const firstPayment = store.createPayment(paymentInput(invoice.id, 'USD', 40))!;
     store.confirmPayment(firstPayment.id);
     expect(store.invoices()[0].status).toBe('partial');
     expect(store.invoiceSettledTotal(invoice.id)).toBe(40);
     expect(store.invoiceBalance(store.invoices()[0])).toBe(76);
 
-    const finalPayment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 76 })!;
+    const finalPayment = store.createPayment(paymentInput(invoice.id, 'USD', 76))!;
     store.confirmPayment(finalPayment.id);
     expect(store.invoices()[0].status).toBe('paid');
     expect(store.invoiceBalance(store.invoices()[0])).toBe(0);
@@ -284,7 +284,7 @@ describe('LocalSalesCycleStore', () => {
   it('converts a payment into the invoice currency using the latest local rate', () => {
     const invoice = publishedInvoice('USD', 100);
 
-    const payment = store.createPayment({ invoiceId: invoice.id, currency: 'VES', amount: 38.5 })!;
+    const payment = store.createPayment(paymentInput(invoice.id, 'VES', 38.5))!;
     store.confirmPayment(payment.id);
 
     expect(store.payments()[0]).toMatchObject({ currency: 'VES', convertedAmount: 1, frozenRate: 38.5 });
@@ -293,7 +293,7 @@ describe('LocalSalesCycleStore', () => {
 
   it('freezes the rate and its date when a payment is confirmed', () => {
     const invoice = publishedInvoice('USD', 100);
-    const payment = store.createPayment({ invoiceId: invoice.id, currency: 'EUR', amount: 10 })!;
+    const payment = store.createPayment(paymentInput(invoice.id, 'EUR', 10))!;
     const expectedRate = store.latestRate('EUR')!;
 
     store.confirmPayment(payment.id);
@@ -308,13 +308,13 @@ describe('LocalSalesCycleStore', () => {
   it('rejects a payment that exceeds the remaining invoice balance', () => {
     const invoice = publishedInvoice('USD', 100);
 
-    expect(store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 117 })).toBeUndefined();
+    expect(store.createPayment(paymentInput(invoice.id, 'USD', 117))).toBeUndefined();
     expect(store.payments()).toHaveLength(0);
   });
 
   it('voids a confirmed payment, restores the invoice balance, and retains its frozen rate', () => {
     const invoice = publishedInvoice('USD', 100);
-    const payment = store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 116 })!;
+    const payment = store.createPayment(paymentInput(invoice.id, 'USD', 116))!;
     store.confirmPayment(payment.id);
     const confirmedPayment = store.payments()[0];
 
@@ -370,6 +370,40 @@ describe('LocalSalesCycleStore', () => {
     expect(store.invoiceTotals(republished)).toEqual({ subtotal: 100, vat: 16, total: 116 });
   });
 
+  it('uses the latest rate on or before the payment date and rejects absent history', () => {
+    const invoice = publishedInvoice('USD', 100);
+    const olderRate = store.exchangeRates().filter((rate) => rate.currency === 'VES').sort((a, b) => a.date.localeCompare(b.date))[2];
+
+    const preview = store.paymentPreview(store.invoices()[0], 'VES', 38.5, olderRate.date);
+    expect(preview?.rate.date).toBe(olderRate.date);
+    expect(store.paymentPreview(store.invoices()[0], 'VES', 38.5, '2000-01-01')).toBeUndefined();
+  });
+
+  it('validates required payment metadata and freezes an adjusted-rate snapshot at draft creation', () => {
+    const invoice = publishedInvoice('USD', 100);
+    const date = store.exchangeRates().find((rate) => rate.currency === 'USD')!.date;
+
+    expect(store.createPayment({ invoiceId: invoice.id, currency: 'USD', amount: 10, paymentDate: date, method: 'cash', reference: '' })).toBeUndefined();
+    const payment = store.createPayment(paymentInput(invoice.id, 'EUR', 10, { adjustedRate: 0.8 }))!;
+    expect(payment).toMatchObject({ method: 'bank transfer', rateSource: 'adjusted', chosenRate: 0.8, convertedAmount: 12.5 });
+    store.confirmPayment(payment.id);
+    expect(store.payments()[0]).toMatchObject({ status: 'confirmed', chosenRate: 0.8, rateSource: 'adjusted', convertedAmount: 12.5 });
+  });
+
+  it('settles with mixed currencies and restores settlement when one payment is voided', () => {
+    const invoice = publishedInvoice('USD', 100);
+    const usd = store.createPayment(paymentInput(invoice.id, 'USD', 40))!;
+    const eur = store.createPayment(paymentInput(invoice.id, 'EUR', 69.92))!;
+    store.confirmPayment(usd.id);
+    store.confirmPayment(eur.id);
+
+    expect(store.invoices()[0].status).toBe('paid');
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(0);
+    store.voidPayment(eur.id);
+    expect(store.invoices()[0].status).toBe('partial');
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(76);
+  });
+
   function publishedInvoice(currency: 'USD' | 'VES' | 'EUR', unitPrice: number) {
     const product = store.inventory()[0];
     const order = store.createSalesOrder({
@@ -382,5 +416,9 @@ describe('LocalSalesCycleStore', () => {
     const invoice = store.createInvoiceFromOrder(order.id)!;
     store.publishInvoice(invoice.id);
     return invoice;
+  }
+
+  function paymentInput(invoiceId: import('../model/sales.models').InvoiceId, currency: 'USD' | 'VES' | 'EUR', amount: number, overrides: Partial<{ paymentDate: string; method: 'cash' | 'bank transfer' | 'mobile payment' | 'zelle'; reference: string; adjustedRate: number }> = {}) {
+    return { invoiceId, currency, amount, paymentDate: store.exchangeRates().find((rate) => rate.currency === 'USD')!.date, method: 'bank transfer' as const, reference: `REF-${amount}`, ...overrides };
   }
 });

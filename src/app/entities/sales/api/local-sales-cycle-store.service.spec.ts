@@ -144,6 +144,55 @@ describe('LocalSalesCycleStore', () => {
     expect(store.inventory().find((item) => item.id === product.id)?.availableQuantity).toBe(initialStock);
   });
 
+  it('migrates global inventory into the default warehouse without losing stock or delivery sources', () => {
+    localStorage.setItem('sales-cycle-state-v1', JSON.stringify({
+      salesOrders: [{ id: 'so-legacy', reference: 'SO-LEGACY', customerName: 'Legacy Customer', status: 'confirmed', currency: 'USD', lines: [], orderDate: '2026-10-01', createdAt: '2026-10-01T00:00:00.000Z' }],
+      deliveries: [{ id: 'delivery-legacy', reference: 'OUT-LEGACY', orderId: 'so-legacy', orderReference: 'SO-LEGACY', status: 'pending', lines: [], createdAt: '2026-10-01T00:00:00.000Z' }],
+      invoices: [], payments: [], exchangeRates: [],
+      inventory: [{ id: 'desk-lamp', sku: 'LGT-001', name: 'Arc Desk Lamp', availableQuantity: 24, unit: 'units', suggestedUnitPrice: 49.95 }],
+    }));
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({});
+    const legacyStore = TestBed.inject(LocalSalesCycleStore);
+
+    expect(legacyStore.warehouses()).toHaveLength(2);
+    expect(legacyStore.warehouses()[0]).toMatchObject({ id: 'warehouse-main', stock: [{ productId: 'desk-lamp', availableQuantity: 24 }] });
+    expect(legacyStore.deliveries()[0]).toMatchObject({ customerName: 'Legacy Customer', warehouseId: 'warehouse-main', warehouseName: 'Main Warehouse' });
+    expect(JSON.parse(localStorage.getItem('sales-cycle-state-v1') ?? '{}').warehouses).toHaveLength(2);
+  });
+
+  it('validates a partial shipment atomically, deducts only its warehouse, and creates one linked backorder', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [{ productId: product.id, description: product.name, quantity: 3, unitPrice: 50 }],
+    });
+    store.confirmSalesOrder(order.id);
+    const delivery = store.deliveries()[0];
+    const mainStock = store.warehouseStock('warehouse-main', product.id);
+    const westStock = store.warehouseStock('warehouse-west', product.id);
+    store.updateDeliveryWarehouse(delivery.id, 'warehouse-west');
+
+    store.validateDelivery(delivery.id, [{ ...delivery.lines[0], quantity: 1 }]);
+    store.validateDelivery(delivery.id, [{ ...delivery.lines[0], quantity: 1 }]);
+
+    const validated = store.deliveries().find((candidate) => candidate.id === delivery.id)!;
+    const backorder = store.deliveries().find((candidate) => candidate.parentDeliveryId === delivery.id)!;
+    expect(validated).toMatchObject({ status: 'validated', customerName: 'Acme', warehouseId: 'warehouse-west', lines: [{ quantity: 1 }] });
+    expect(backorder).toMatchObject({ status: 'pending', orderId: order.id, parentDeliveryId: delivery.id, warehouseId: 'warehouse-west', lines: [{ quantity: 2 }] });
+    expect(store.deliveries()).toHaveLength(2);
+    expect(store.warehouseStock('warehouse-main', product.id)).toBe(mainStock);
+    expect(store.warehouseStock('warehouse-west', product.id)).toBe(westStock - 1);
+    expect(store.salesOrders().find((candidate) => candidate.id === order.id)?.status).toBe('confirmed');
+    expect(store.orderLineQuantities(order.id, product.id)).toEqual({ ordered: 3, delivered: 1, invoiced: 0 });
+    expect(store.invoiceEligibility(order.id)).toMatchObject({ deliveryIds: [delivery.id], lines: [{ quantity: 1 }] });
+
+    store.validateDelivery(backorder.id);
+    expect(store.salesOrders().find((candidate) => candidate.id === order.id)?.status).toBe('completed');
+    expect(store.deliveries().filter((candidate) => candidate.parentDeliveryId === backorder.id)).toHaveLength(0);
+  });
+
   it('only exposes validated and uninvoiced quantities for invoicing', () => {
     const product = store.inventory()[0];
     const order = store.createSalesOrder({

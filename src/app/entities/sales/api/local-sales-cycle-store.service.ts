@@ -1,6 +1,6 @@
 import { Injectable, computed, signal } from '@angular/core';
 import { ExchangeRate } from '../../exchange-rate/model/exchange-rate.models';
-import { InventoryItem } from '../../inventory/model/inventory.models';
+import { InventoryItem, Warehouse } from '../../inventory/model/inventory.models';
 import {
   CurrencyCode,
   Delivery,
@@ -23,10 +23,12 @@ interface SalesCycleState {
   invoices: Invoice[];
   payments: Payment[];
   inventory: InventoryItem[];
+  warehouses: Warehouse[];
   exchangeRates: ExchangeRate[];
 }
 
 const STORAGE_KEY = 'sales-cycle-state-v1';
+const DEFAULT_WAREHOUSE_ID = 'warehouse-main';
 const FIXTURE_PRICES = new Map<string, { sku: string; name: string; suggestedUnitPrice: number }>([
   ['desk-lamp', { sku: 'LGT-001', name: 'Arc Desk Lamp', suggestedUnitPrice: 49.95 }],
   ['notebook', { sku: 'OFF-014', name: 'Hardcover Notebook', suggestedUnitPrice: 12.5 }],
@@ -41,7 +43,8 @@ export class LocalSalesCycleStore {
   readonly deliveries = computed(() => this.state().deliveries);
   readonly invoices = computed(() => this.state().invoices);
   readonly payments = computed(() => this.state().payments);
-  readonly inventory = computed(() => this.state().inventory);
+  readonly inventory = computed(() => this.inventoryForState(this.state()));
+  readonly warehouses = computed(() => this.state().warehouses);
   readonly exchangeRates = computed(() => this.state().exchangeRates);
 
   latestRate(currency: CurrencyCode): ExchangeRate | undefined {
@@ -67,7 +70,12 @@ export class LocalSalesCycleStore {
   }
 
   suggestedUnitPrice(productId: ProductId): number {
-    return this.roundAmount(this.inventory().find((item) => item.id === productId)?.suggestedUnitPrice ?? 0);
+    return this.roundAmount(this.inventoryForState(this.state()).find((item) => item.id === productId)?.suggestedUnitPrice ?? 0);
+  }
+
+  warehouseStock(warehouseId: string, productId: ProductId): number {
+    return this.state().warehouses.find((warehouse) => warehouse.id === warehouseId)
+      ?.stock.find((item) => item.productId === productId)?.availableQuantity ?? 0;
   }
 
   orderLineQuantities(orderId: SalesOrderId, productId: ProductId): OrderLineQuantities {
@@ -138,6 +146,9 @@ export class LocalSalesCycleStore {
         reference: this.reference('OUT'),
         orderId: order.id,
         orderReference: order.reference,
+        customerName: order.customerName,
+        warehouseId: DEFAULT_WAREHOUSE_ID,
+        warehouseName: this.warehouseNameForState(state, DEFAULT_WAREHOUSE_ID),
         status: 'pending',
         lines: order.lines.map((line) => ({ ...line })),
         createdAt: new Date().toISOString(),
@@ -165,30 +176,76 @@ export class LocalSalesCycleStore {
     return this.canCancelSalesOrderForState(this.state(), order);
   }
 
-  validateDelivery(deliveryId: DeliveryId): void {
+  updateDeliveryWarehouse(deliveryId: DeliveryId, warehouseId: string): void {
+    this.updateState((state) => {
+      const delivery = state.deliveries.find((candidate) => candidate.id === deliveryId);
+      const warehouse = state.warehouses.find((candidate) => candidate.id === warehouseId);
+      if (!delivery || delivery.status !== 'pending' || !warehouse) return state;
+      return {
+        ...state,
+        deliveries: state.deliveries.map((candidate) => candidate.id === deliveryId
+          ? { ...candidate, warehouseId: warehouse.id, warehouseName: warehouse.name }
+          : candidate),
+      };
+    });
+  }
+
+  validateDelivery(deliveryId: DeliveryId, shippedLines?: DocumentLine[]): void {
     this.updateState((state) => {
       const delivery = state.deliveries.find((candidate) => candidate.id === deliveryId);
       if (!delivery || delivery.status !== 'pending') return state;
 
-      const deliveredQuantities = this.quantitiesByProduct(delivery.lines);
-      const canFulfillDelivery = [...deliveredQuantities].every(([productId, quantity]) => {
-        const item = state.inventory.find((candidate) => candidate.id === productId);
-        return item !== undefined && item.availableQuantity >= quantity;
+      const warehouse = state.warehouses.find((candidate) => candidate.id === delivery.warehouseId);
+      const shippedByProduct = this.quantitiesByProduct(shippedLines ?? delivery.lines);
+      const pendingByProduct = this.quantitiesByProduct(delivery.lines);
+      const hasValidQuantities = delivery.lines.every((line) => {
+        const shippedQuantity = shippedByProduct.get(line.productId) ?? 0;
+        const availableQuantity = warehouse?.stock.find((item) => item.productId === line.productId)?.availableQuantity ?? 0;
+        return Number.isInteger(shippedQuantity) && shippedQuantity > 0 && shippedQuantity <= line.quantity && shippedQuantity <= availableQuantity;
       });
-      if (!canFulfillDelivery) return state;
+      if (!warehouse || !hasValidQuantities || shippedByProduct.size !== pendingByProduct.size) return state;
+
+      const validatedLines = delivery.lines.map((line) => ({ ...line, quantity: shippedByProduct.get(line.productId)! }));
+      const backorderLines = delivery.lines.flatMap((line) => {
+        const pendingQuantity = line.quantity - (shippedByProduct.get(line.productId) ?? 0);
+        return pendingQuantity > 0 ? [{ ...line, quantity: pendingQuantity }] : [];
+      });
+      const nextDeliveries = state.deliveries.map((candidate) => candidate.id === deliveryId
+        ? { ...candidate, status: 'validated' as const, lines: validatedLines }
+        : candidate);
+      const backorder: Delivery | undefined = backorderLines.length > 0 ? {
+        id: this.deliveryId(),
+        reference: this.reference('OUT'),
+        orderId: delivery.orderId,
+        orderReference: delivery.orderReference,
+        customerName: delivery.customerName,
+        warehouseId: delivery.warehouseId,
+        warehouseName: delivery.warehouseName,
+        parentDeliveryId: delivery.id,
+        status: 'pending',
+        lines: backorderLines,
+        createdAt: new Date().toISOString(),
+      } : undefined;
+      const deliveries = backorder ? [backorder, ...nextDeliveries] : nextDeliveries;
+      const deliveredByProduct = this.quantitiesByProduct(
+        deliveries.filter((candidate) => candidate.orderId === delivery.orderId && candidate.status === 'validated').flatMap((candidate) => candidate.lines),
+      );
+      const order = state.salesOrders.find((candidate) => candidate.id === delivery.orderId);
+      const isCompleted = order?.lines.every((line) => (deliveredByProduct.get(line.productId) ?? 0) >= line.quantity) ?? false;
 
       return {
         ...state,
         salesOrders: state.salesOrders.map((order) =>
-          order.id === delivery.orderId ? { ...order, status: 'completed' } : order,
+          order.id === delivery.orderId ? { ...order, status: isCompleted ? 'completed' : 'confirmed' } : order,
         ),
-        deliveries: state.deliveries.map((candidate) =>
-          candidate.id === deliveryId ? { ...candidate, status: 'validated' } : candidate,
-        ),
-        inventory: state.inventory.map((item) => ({
-          ...item,
-          availableQuantity: item.availableQuantity - (deliveredQuantities.get(item.id) ?? 0),
-        })),
+        deliveries,
+        warehouses: state.warehouses.map((candidate) => candidate.id !== warehouse.id ? candidate : {
+          ...candidate,
+          stock: candidate.stock.map((item) => ({
+            ...item,
+            availableQuantity: item.availableQuantity - (shippedByProduct.get(item.productId) ?? 0),
+          })),
+        }),
       };
     });
   }
@@ -458,12 +515,28 @@ export class LocalSalesCycleStore {
     if (!stored) return this.seedState();
 
     try {
-      const state = JSON.parse(stored) as SalesCycleState;
+      const state = JSON.parse(stored) as Partial<SalesCycleState>;
+      const inventory = (state.inventory ?? []).map((item) => this.migrateFixturePrice(item));
+      const warehouses = this.withSecondaryWarehouse(state.warehouses?.length ? state.warehouses : [this.defaultWarehouse(inventory)], inventory);
       const migratedState = {
         ...state,
-        inventory: state.inventory.map((item) => this.migrateFixturePrice(item)),
-        salesOrders: state.salesOrders.map((order) => ({ ...order, orderDate: order.orderDate ?? order.createdAt.slice(0, 10) })),
-      };
+        inventory,
+        warehouses,
+        salesOrders: (state.salesOrders ?? []).map((order) => ({ ...order, orderDate: order.orderDate ?? order.createdAt.slice(0, 10) })),
+        deliveries: (state.deliveries ?? []).map((delivery) => {
+          const order = state.salesOrders?.find((candidate) => candidate.id === delivery.orderId);
+          const warehouse = warehouses.find((candidate) => candidate.id === delivery.warehouseId) ?? warehouses[0];
+          return {
+            ...delivery,
+            customerName: delivery.customerName ?? order?.customerName ?? 'Customer unavailable',
+            warehouseId: warehouse.id,
+            warehouseName: warehouse.name,
+          };
+        }),
+        invoices: state.invoices ?? [],
+        payments: state.payments ?? [],
+        exchangeRates: state.exchangeRates ?? [],
+      } as SalesCycleState;
       this.persist(migratedState);
       return migratedState;
     } catch {
@@ -482,15 +555,30 @@ export class LocalSalesCycleStore {
   }
 
   private seedState(): SalesCycleState {
+    const inventory: InventoryItem[] = [
+      { id: 'desk-lamp' as ProductId, sku: 'LGT-001', name: 'Arc Desk Lamp', availableQuantity: 24, unit: 'units', suggestedUnitPrice: 49.95 },
+      { id: 'notebook' as ProductId, sku: 'OFF-014', name: 'Hardcover Notebook', availableQuantity: 80, unit: 'units', suggestedUnitPrice: 12.5 },
+      { id: 'chair' as ProductId, sku: 'FUR-020', name: 'Ergonomic Chair', availableQuantity: 12, unit: 'units', suggestedUnitPrice: 275 },
+    ];
     const state: SalesCycleState = {
       salesOrders: [],
       deliveries: [],
       invoices: [],
       payments: [],
-      inventory: [
-        { id: 'desk-lamp' as ProductId, sku: 'LGT-001', name: 'Arc Desk Lamp', availableQuantity: 24, unit: 'units', suggestedUnitPrice: 49.95 },
-        { id: 'notebook' as ProductId, sku: 'OFF-014', name: 'Hardcover Notebook', availableQuantity: 80, unit: 'units', suggestedUnitPrice: 12.5 },
-        { id: 'chair' as ProductId, sku: 'FUR-020', name: 'Ergonomic Chair', availableQuantity: 12, unit: 'units', suggestedUnitPrice: 275 },
+      inventory,
+      warehouses: [
+        {
+          id: DEFAULT_WAREHOUSE_ID,
+          name: 'Main Warehouse',
+          code: 'MAIN',
+          stock: inventory.map((item) => ({ productId: item.id, availableQuantity: Math.ceil(item.availableQuantity * 0.7) })),
+        },
+        {
+          id: 'warehouse-west',
+          name: 'West Warehouse',
+          code: 'WEST',
+          stock: inventory.map((item) => ({ productId: item.id, availableQuantity: item.availableQuantity - Math.ceil(item.availableQuantity * 0.7) })),
+        },
       ],
       exchangeRates: this.seedExchangeRates(),
     };
@@ -518,5 +606,36 @@ export class LocalSalesCycleStore {
 
   private storage(): Storage | undefined {
     return typeof localStorage === 'undefined' ? undefined : localStorage;
+  }
+
+  private inventoryForState(state: SalesCycleState): InventoryItem[] {
+    return state.inventory.map((item) => ({
+      ...item,
+      availableQuantity: state.warehouses.reduce((total, warehouse) =>
+        total + (warehouse.stock.find((stock) => stock.productId === item.id)?.availableQuantity ?? 0), 0),
+    }));
+  }
+
+  private defaultWarehouse(inventory: InventoryItem[]): Warehouse {
+    return {
+      id: DEFAULT_WAREHOUSE_ID,
+      name: 'Main Warehouse',
+      code: 'MAIN',
+      stock: inventory.map((item) => ({ productId: item.id, availableQuantity: item.availableQuantity })),
+    };
+  }
+
+  private withSecondaryWarehouse(warehouses: Warehouse[], inventory: InventoryItem[]): Warehouse[] {
+    if (warehouses.some((warehouse) => warehouse.id === 'warehouse-west')) return warehouses;
+    return [...warehouses, {
+      id: 'warehouse-west',
+      name: 'West Warehouse',
+      code: 'WEST',
+      stock: inventory.map((item) => ({ productId: item.id, availableQuantity: 0 })),
+    }];
+  }
+
+  private warehouseNameForState(state: SalesCycleState, warehouseId: string): string {
+    return state.warehouses.find((warehouse) => warehouse.id === warehouseId)?.name ?? 'Warehouse unavailable';
   }
 }

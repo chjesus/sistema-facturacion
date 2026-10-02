@@ -107,7 +107,7 @@ The base project is an uncustomized Angular starter. Users need four connected v
        reserve settlement capacity; confirmation atomically applies the 0.01
        tolerance. Checks: `npm run format:check`, `npm run lint`, `npm test --
        --watch=false` (20 files, 54 tests), `npm run build` (264.64 kB initial),
-       and `git diff --check` passed. Commit: pending.
+       and `git diff --check` passed. Commit: `8030a95`.
 - [ ] SC-24 — Add deterministic invariant/concurrency test coverage and document
       local-only guarantees. Route: delegated; trigger: multi-file verification.
       Checks: format, lint, test, build. Evidence: pending.

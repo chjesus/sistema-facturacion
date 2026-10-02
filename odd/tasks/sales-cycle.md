@@ -108,10 +108,22 @@ The base project is an uncustomized Angular starter. Users need four connected v
        tolerance. Checks: `npm run format:check`, `npm run lint`, `npm test --
        --watch=false` (20 files, 54 tests), `npm run build` (264.64 kB initial),
        and `git diff --check` passed. Commit: `8030a95`.
-- [ ] SC-24 — Add deterministic invariant/concurrency test coverage and document
-      local-only guarantees. Route: delegated; trigger: multi-file verification.
-      Checks: format, lint, test, build. Evidence: pending.
+- [x] SC-24 — Added deterministic local-replica tests for stale delivery
+       validation with nonnegative stock, unique SO/DES sequences, repeated-product
+       line provenance, delivery/invoice ceilings, mixed-currency conversion with
+       0.01 settlement tolerance, immutable confirmed/validated/published content,
+       and completion/reversal transitions. Added browser-test-safe Web Locks adapter
+       and no-lock fallback contract coverage. The transaction seam documents that
+       it is same-origin/local only: Web Locks do not provide cross-device or
+       server-authoritative guarantees, and the no-lock fallback lacks cross-tab
+       serialization. Checks: `npm run format:check` passed; `npm run lint` passed;
+       focused `npm test -- --watch=false --include='src/app/entities/sales/api/local-sales-cycle-store.service.spec.ts'`
+       passed (1 file, 39 tests); full `npm test -- --watch=false` passed (20 files,
+       62 tests); `npm run build` passed (264.64 kB initial); `git diff --check`
+       passed. Files: `src/app/entities/sales/api/local-sales-cycle-store.service.ts`,
+       `src/app/entities/sales/api/local-sales-cycle-store.service.spec.ts`,
+       `odd/tasks/sales-cycle.md`. Commit: `c5d5d91`.
 
 ## Progress and Next Step
 
-SC-01 through SC-21 are completed on branch `feature/transactional-invariants`. SC-22 through SC-24 will add same-origin local transaction serialization and enforce commercial invariants. Invoice FX resolves on the payment date; local concurrency is limited to `navigator.locks` and will migrate to Supabase for cross-device guarantees. Presentation composition follows pragmatic FSD with Tailwind v4 shared tokens/primitives while retaining the protected transactional store. Payments originate from payable invoices through Register Payment, resolve payment and invoice FX rates on or before the payment date, and retain frozen history or adjusted snapshots through confirmation and voiding. Invoice issuance occurs at publication using the latest available VES rate dated on or before issue date; voided invoices retain their assigned number. Sales-order monetary values use a fixed 16% VAT rate. Engram mirror remains pending because multiple active runtime sessions prevent an unambiguous write. Receipt-driven development is disabled for this clone by user authorization after the native review flow rejected its negotiated continuation; delivery remains unmanaged under ordinary repository policy.
+SC-01 through SC-24 are completed on branch `feature/transactional-invariants`. Same-origin local transaction serialization and commercial invariant coverage are complete. Invoice FX resolves on the payment date; Web Locks are local to the browser origin and will migrate to Supabase for cross-device, server-authoritative guarantees. Presentation composition follows pragmatic FSD with Tailwind v4 shared tokens/primitives while retaining the protected transactional store. Payments originate from payable invoices through Register Payment, resolve payment and invoice FX rates on or before the payment date, and retain frozen history or adjusted snapshots through confirmation and voiding. Invoice issuance occurs at publication using the latest available VES rate dated on or before issue date; voided invoices retain their assigned number. Sales-order monetary values use a fixed 16% VAT rate. Engram mirror remains pending because multiple active runtime sessions prevent an unambiguous write. Receipt-driven development is disabled for this clone by user authorization after the native review flow rejected its negotiated continuation; delivery remains unmanaged under ordinary repository policy.

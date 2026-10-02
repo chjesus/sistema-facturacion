@@ -95,7 +95,35 @@ The base project is an uncustomized Angular starter. Users need four connected v
       `npm run lint` passed (all files); `npm test -- --watch=false` passed (20
       files, 48 tests); `npm run build` passed (initial bundle: 264.64 kB); `git
       diff --check` passed. Commit: `987ec38`.
+- [x] SC-22 — Added a revisioned local transaction envelope with durable SO/DES/FAC/PAG
+      counters, Web Locks serialization, BroadcastChannel/storage-event refresh, a
+      documented synchronous no-lock fallback, sequential transition references, and
+      defensive legacy line-provenance migration. Checks: `npm run format:check`,
+      `npm run lint`, `npm test -- --watch=false` (20 files, 51 tests), `npm run
+      build`, and `git diff --check` passed. Commit: `b153183`.
+- [x] SC-23 — Enforced latest-state delivery source/stock limits, non-voided
+       invoice-line reservations, confirmed-payment settlement ceilings, immutable
+       document content, and paid-invoice order completion. Draft payments do not
+       reserve settlement capacity; confirmation atomically applies the 0.01
+       tolerance. Checks: `npm run format:check`, `npm run lint`, `npm test --
+       --watch=false` (20 files, 54 tests), `npm run build` (264.64 kB initial),
+       and `git diff --check` passed. Commit: `8030a95`.
+- [x] SC-24 — Added deterministic local-replica tests for stale delivery
+       validation with nonnegative stock, unique SO/DES sequences, repeated-product
+       line provenance, delivery/invoice ceilings, mixed-currency conversion with
+       0.01 settlement tolerance, immutable confirmed/validated/published content,
+       and completion/reversal transitions. Added browser-test-safe Web Locks adapter
+       and no-lock fallback contract coverage. The transaction seam documents that
+       it is same-origin/local only: Web Locks do not provide cross-device or
+       server-authoritative guarantees, and the no-lock fallback lacks cross-tab
+       serialization. Checks: `npm run format:check` passed; `npm run lint` passed;
+       focused `npm test -- --watch=false --include='src/app/entities/sales/api/local-sales-cycle-store.service.spec.ts'`
+       passed (1 file, 39 tests); full `npm test -- --watch=false` passed (20 files,
+       62 tests); `npm run build` passed (264.64 kB initial); `git diff --check`
+       passed. Files: `src/app/entities/sales/api/local-sales-cycle-store.service.ts`,
+       `src/app/entities/sales/api/local-sales-cycle-store.service.spec.ts`,
+       `odd/tasks/sales-cycle.md`. Commit: `c5d5d91`.
 
 ## Progress and Next Step
 
-SC-01 through SC-16 are completed on branch `refactor/angular-template-readability`. SC-17 through SC-21 will enforce readable Angular templates with Prettier/Angular ESLint and externalized complex markup. Presentation composition follows pragmatic FSD with Tailwind v4 shared tokens/primitives while retaining the protected transactional store. Payments originate from payable invoices through Register Payment, resolve payment and invoice FX rates on or before the payment date, and retain frozen history or adjusted snapshots through confirmation and voiding. Invoice issuance occurs at publication using the latest available VES rate dated on or before issue date; voided invoices retain their assigned number. Sales-order monetary values use a fixed 16% VAT rate. Engram mirror remains pending because multiple active runtime sessions prevent an unambiguous write. Receipt-driven development is disabled for this clone by user authorization after the native review flow rejected its negotiated continuation; delivery remains unmanaged under ordinary repository policy.
+SC-01 through SC-24 are completed on branch `feature/transactional-invariants`. Same-origin local transaction serialization and commercial invariant coverage are complete. Invoice FX resolves on the payment date; Web Locks are local to the browser origin and will migrate to Supabase for cross-device, server-authoritative guarantees. Presentation composition follows pragmatic FSD with Tailwind v4 shared tokens/primitives while retaining the protected transactional store. Payments originate from payable invoices through Register Payment, resolve payment and invoice FX rates on or before the payment date, and retain frozen history or adjusted snapshots through confirmation and voiding. Invoice issuance occurs at publication using the latest available VES rate dated on or before issue date; voided invoices retain their assigned number. Sales-order monetary values use a fixed 16% VAT rate. Engram mirror remains pending because multiple active runtime sessions prevent an unambiguous write. Receipt-driven development is disabled for this clone by user authorization after the native review flow rejected its negotiated continuation; delivery remains unmanaged under ordinary repository policy.

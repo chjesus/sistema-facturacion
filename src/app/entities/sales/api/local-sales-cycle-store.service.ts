@@ -23,6 +23,9 @@ import {
 } from '../model/sales.models';
 
 interface SalesCycleState {
+  /** Local transaction envelope revision; a future remote adapter replaces this seam. */
+  revision: number;
+  counters: DocumentCounters;
   salesOrders: SalesOrder[];
   deliveries: Delivery[];
   invoices: Invoice[];
@@ -30,6 +33,20 @@ interface SalesCycleState {
   inventory: InventoryItem[];
   warehouses: Warehouse[];
   exchangeRates: ExchangeRate[];
+}
+
+interface DocumentCounters {
+  SO: number;
+  DES: number;
+  FAC: number;
+  PAG: number;
+}
+
+type DocumentCounter = keyof DocumentCounters;
+
+interface MutationResult<T> {
+  state: SalesCycleState;
+  result: T;
 }
 
 export interface PaymentPreview {
@@ -40,6 +57,7 @@ export interface PaymentPreview {
 }
 
 const STORAGE_KEY = 'sales-cycle-state-v1';
+const LOCK_NAME = 'sales-cycle-state-v1';
 const DEFAULT_WAREHOUSE_ID = 'warehouse-main';
 const FIXTURE_PRICES = new Map<
   string,
@@ -62,6 +80,16 @@ const FIXTURE_PRICES = new Map<
 @Injectable({ providedIn: 'root' })
 export class LocalSalesCycleStore {
   private readonly state = signal<SalesCycleState>(this.readState());
+  private readonly channel = this.createChannel();
+
+  constructor() {
+    this.channel?.addEventListener('message', () => this.refreshFromStorage());
+    if (typeof window !== 'undefined') {
+      window.addEventListener('storage', (event) => {
+        if (event.key === STORAGE_KEY) this.refreshFromStorage();
+      });
+    }
+  }
 
   readonly salesOrders = computed(() => this.state().salesOrders);
   readonly deliveries = computed(() => this.state().deliveries);
@@ -188,9 +216,7 @@ export class LocalSalesCycleStore {
     );
   }
 
-  invoiceEligibility(
-    orderId: SalesOrderId,
-  ):
+  invoiceEligibility(orderId: SalesOrderId):
     | {
         lines: DocumentLine[];
         deliveryIds: DeliveryId[];
@@ -206,25 +232,35 @@ export class LocalSalesCycleStore {
     orderDate?: string;
     lines: DocumentLine[];
   }): SalesOrder {
-    const order: SalesOrder = {
-      id: this.salesOrderId(),
-      reference: this.reference('SO'),
-      customerName: input.customerName.trim(),
-      status: 'draft',
-      currency: input.currency,
-      lines: input.lines.map((line) => ({
-        ...line,
-        unitPrice: this.roundAmount(line.unitPrice),
-      })),
-      orderDate: input.orderDate ?? new Date().toISOString().slice(0, 10),
-      createdAt: new Date().toISOString(),
-    };
-
-    this.updateState((state) => ({
-      ...state,
-      salesOrders: [order, ...state.salesOrders],
-    }));
-    return order;
+    return this.mutate((state) => {
+      if (!this.isValidSalesOrderInput(input)) {
+        return { state, result: undefined as unknown as SalesOrder };
+      }
+      const allocated = this.allocateReference(state, 'SO');
+      const order: SalesOrder = {
+        id: this.salesOrderId(),
+        reference: allocated.reference,
+        customerName: input.customerName.trim(),
+        status: 'draft',
+        currency: input.currency,
+        lines: input.lines.map((line, index) => ({
+          ...line,
+          sourceLineId:
+            line.sourceLineId ?? `order:${allocated.reference}:${index}`,
+          unitPrice: this.roundAmount(line.unitPrice),
+        })),
+        orderDate: input.orderDate ?? new Date().toISOString().slice(0, 10),
+        createdAt: new Date().toISOString(),
+      };
+      return {
+        state: {
+          ...state,
+          counters: allocated.counters,
+          salesOrders: [order, ...state.salesOrders],
+        },
+        result: order,
+      };
+    }) as SalesOrder;
   }
 
   updateSalesOrder(input: {
@@ -236,20 +272,22 @@ export class LocalSalesCycleStore {
   }): void {
     this.updateState((state) => ({
       ...state,
-      salesOrders: state.salesOrders.map((order) =>
-        order.id === input.id && order.status === 'draft'
-          ? {
-              ...order,
-              customerName: input.customerName.trim(),
-              currency: input.currency,
-              orderDate: input.orderDate,
-              lines: input.lines.map((line) => ({
-                ...line,
-                unitPrice: this.roundAmount(line.unitPrice),
-              })),
-            }
-          : order,
-      ),
+      salesOrders: !this.isValidSalesOrderInput(input)
+        ? state.salesOrders
+        : state.salesOrders.map((order) =>
+            order.id === input.id && order.status === 'draft'
+              ? {
+                  ...order,
+                  customerName: input.customerName.trim(),
+                  currency: input.currency,
+                  orderDate: input.orderDate,
+                  lines: input.lines.map((line) => ({
+                    ...line,
+                    unitPrice: this.roundAmount(line.unitPrice),
+                  })),
+                }
+              : order,
+          ),
     }));
   }
 
@@ -260,9 +298,10 @@ export class LocalSalesCycleStore {
       );
       if (!order || order.status !== 'draft') return state;
 
+      const allocated = this.allocateReference(state, 'DES');
       const delivery: Delivery = {
         id: this.deliveryId(),
-        reference: this.reference('OUT'),
+        reference: allocated.reference,
         orderId: order.id,
         orderReference: order.reference,
         customerName: order.customerName,
@@ -275,6 +314,7 @@ export class LocalSalesCycleStore {
 
       return {
         ...state,
+        counters: allocated.counters,
         salesOrders: state.salesOrders.map((candidate) =>
           candidate.id === orderId
             ? { ...candidate, status: 'confirmed' }
@@ -345,36 +385,50 @@ export class LocalSalesCycleStore {
       const warehouse = state.warehouses.find(
         (candidate) => candidate.id === delivery.warehouseId,
       );
-      const shippedByProduct = this.quantitiesByProduct(
-        shippedLines ?? delivery.lines,
+      const shipment = shippedLines ?? delivery.lines;
+      const shippedBySource = this.shippedQuantitiesBySource(
+        delivery,
+        shipment,
       );
-      const pendingByProduct = this.quantitiesByProduct(delivery.lines);
-      const hasValidQuantities = delivery.lines.every((line) => {
-        const shippedQuantity = shippedByProduct.get(line.productId) ?? 0;
-        const availableQuantity =
-          warehouse?.stock.find((item) => item.productId === line.productId)
-            ?.availableQuantity ?? 0;
+      if (!warehouse || !shippedBySource) return state;
+      const shippedByProduct = this.quantitiesByProduct(shipment);
+      const deliveredBySource = this.quantitiesBySource(
+        state.deliveries
+          .filter(
+            (candidate) =>
+              candidate.id !== delivery.id && candidate.status === 'validated',
+          )
+          .flatMap((candidate) => candidate.lines),
+      );
+      const order = state.salesOrders.find(
+        (candidate) => candidate.id === delivery.orderId,
+      );
+      const hasAvailableStock = [...shippedByProduct].every(
+        ([productId, quantity]) =>
+          quantity <=
+          (warehouse.stock.find((item) => item.productId === productId)
+            ?.availableQuantity ?? 0),
+      );
+      const respectsOrderSources = delivery.lines.every((line) => {
+        const sourceLine = order?.lines.find(
+          (candidate) => candidate.sourceLineId === line.sourceLineId,
+        );
+        const shippedQuantity = shippedBySource.get(line.sourceLineId!) ?? 0;
         return (
-          Number.isInteger(shippedQuantity) &&
-          shippedQuantity > 0 &&
-          shippedQuantity <= line.quantity &&
-          shippedQuantity <= availableQuantity
+          sourceLine?.productId === line.productId &&
+          (deliveredBySource.get(line.sourceLineId!) ?? 0) + shippedQuantity <=
+            sourceLine.quantity
         );
       });
-      if (
-        !warehouse ||
-        !hasValidQuantities ||
-        shippedByProduct.size !== pendingByProduct.size
-      )
-        return state;
+      if (!hasAvailableStock || !respectsOrderSources) return state;
 
       const validatedLines = delivery.lines.map((line) => ({
         ...line,
-        quantity: shippedByProduct.get(line.productId)!,
+        quantity: shippedBySource.get(line.sourceLineId!)!,
       }));
       const backorderLines = delivery.lines.flatMap((line) => {
         const pendingQuantity =
-          line.quantity - (shippedByProduct.get(line.productId) ?? 0);
+          line.quantity - (shippedBySource.get(line.sourceLineId!) ?? 0);
         return pendingQuantity > 0
           ? [{ ...line, quantity: pendingQuantity }]
           : [];
@@ -388,65 +442,49 @@ export class LocalSalesCycleStore {
             }
           : candidate,
       );
-      const backorder: Delivery | undefined =
+      const backorderAllocation =
         backorderLines.length > 0
-          ? {
-              id: this.deliveryId(),
-              reference: this.reference('OUT'),
-              orderId: delivery.orderId,
-              orderReference: delivery.orderReference,
-              customerName: delivery.customerName,
-              warehouseId: delivery.warehouseId,
-              warehouseName: delivery.warehouseName,
-              parentDeliveryId: delivery.id,
-              status: 'pending',
-              lines: backorderLines,
-              createdAt: new Date().toISOString(),
-            }
+          ? this.allocateReference(state, 'DES')
           : undefined;
+      const backorder: Delivery | undefined = backorderAllocation
+        ? {
+            id: this.deliveryId(),
+            reference: backorderAllocation.reference,
+            orderId: delivery.orderId,
+            orderReference: delivery.orderReference,
+            customerName: delivery.customerName,
+            warehouseId: delivery.warehouseId,
+            warehouseName: delivery.warehouseName,
+            parentDeliveryId: delivery.id,
+            status: 'pending',
+            lines: backorderLines,
+            createdAt: new Date().toISOString(),
+          }
+        : undefined;
       const deliveries = backorder
         ? [backorder, ...nextDeliveries]
         : nextDeliveries;
-      const deliveredByProduct = this.quantitiesByProduct(
-        deliveries
-          .filter(
-            (candidate) =>
-              candidate.orderId === delivery.orderId &&
-              candidate.status === 'validated',
-          )
-          .flatMap((candidate) => candidate.lines),
+      return this.recomputeSalesOrderCompletion(
+        {
+          ...state,
+          counters: backorderAllocation?.counters ?? state.counters,
+          deliveries,
+          warehouses: state.warehouses.map((candidate) =>
+            candidate.id !== warehouse.id
+              ? candidate
+              : {
+                  ...candidate,
+                  stock: candidate.stock.map((item) => ({
+                    ...item,
+                    availableQuantity:
+                      item.availableQuantity -
+                      (shippedByProduct.get(item.productId) ?? 0),
+                  })),
+                },
+          ),
+        },
+        delivery.orderId,
       );
-      const order = state.salesOrders.find(
-        (candidate) => candidate.id === delivery.orderId,
-      );
-      const isCompleted =
-        order?.lines.every(
-          (line) =>
-            (deliveredByProduct.get(line.productId) ?? 0) >= line.quantity,
-        ) ?? false;
-
-      return {
-        ...state,
-        salesOrders: state.salesOrders.map((order) =>
-          order.id === delivery.orderId
-            ? { ...order, status: isCompleted ? 'completed' : 'confirmed' }
-            : order,
-        ),
-        deliveries,
-        warehouses: state.warehouses.map((candidate) =>
-          candidate.id !== warehouse.id
-            ? candidate
-            : {
-                ...candidate,
-                stock: candidate.stock.map((item) => ({
-                  ...item,
-                  availableQuantity:
-                    item.availableQuantity -
-                    (shippedByProduct.get(item.productId) ?? 0),
-                })),
-              },
-        ),
-      };
     });
   }
 
@@ -469,17 +507,16 @@ export class LocalSalesCycleStore {
   }
 
   createInvoiceFromOrder(orderId: SalesOrderId): Invoice | undefined {
-    let createdInvoice: Invoice | undefined;
-    this.updateState((state) => {
+    return this.mutate((state) => {
       const order = state.salesOrders.find(
         (candidate) => candidate.id === orderId,
       );
       const eligibility = this.invoiceEligibilityForState(state, orderId);
-      if (!order || !eligibility) return state;
+      if (!order || !eligibility) return { state, result: undefined };
 
-      createdInvoice = {
+      const createdInvoice: Invoice = {
         id: this.invoiceId(),
-        reference: this.reference('INV'),
+        reference: `draft-${this.identifier()}`,
         orderId: order.id,
         orderReference: order.reference,
         deliveryIds: eligibility.deliveryIds,
@@ -489,9 +526,14 @@ export class LocalSalesCycleStore {
         lines: eligibility.lines,
         createdAt: new Date().toISOString(),
       };
-      return { ...state, invoices: [createdInvoice, ...state.invoices] };
-    });
-    return createdInvoice;
+      return {
+        state: this.recomputeSalesOrderCompletion(
+          { ...state, invoices: [createdInvoice, ...state.invoices] },
+          orderId,
+        ),
+        result: createdInvoice,
+      };
+    }) as Invoice | undefined;
   }
 
   publishInvoice(invoiceId: InvoiceId): void {
@@ -511,8 +553,7 @@ export class LocalSalesCycleStore {
     reference: string;
     adjustedRate?: number;
   }): Payment | undefined {
-    let payment: Payment | undefined;
-    this.updateState((state) => {
+    return this.mutate((state) => {
       const invoice = state.invoices.find(
         (candidate) => candidate.id === input.invoiceId,
       );
@@ -521,7 +562,7 @@ export class LocalSalesCycleStore {
             state,
             invoice,
             input.currency,
-            input.amount,
+            this.roundAmount(input.amount),
             input.paymentDate,
             input.adjustedRate,
           )
@@ -532,12 +573,12 @@ export class LocalSalesCycleStore {
         this.invoiceBalanceForState(state, invoice) <= 0 ||
         !this.isValidPaymentInput(input) ||
         !preview ||
-        preview.convertedAmount > this.invoiceBalanceForState(state, invoice)
+        preview.convertedAmount > this.invoiceTotal(invoice) + 0.01
       ) {
-        return state;
+        return { state, result: undefined };
       }
 
-      payment = {
+      const payment: Payment = {
         id: `payment-${this.identifier()}`,
         reference: input.reference.trim(),
         invoiceId: invoice.id,
@@ -556,9 +597,11 @@ export class LocalSalesCycleStore {
         frozenRate: preview.rate.rateToUsd,
         frozenRateDate: preview.rate.date,
       };
-      return { ...state, payments: [payment, ...state.payments] };
-    });
-    return payment;
+      return {
+        state: { ...state, payments: [payment, ...state.payments] },
+        result: payment,
+      };
+    }) as Payment | undefined;
   }
 
   confirmPayment(paymentId: string): void {
@@ -574,24 +617,31 @@ export class LocalSalesCycleStore {
         !invoice ||
         payment.status !== 'draft' ||
         !this.isPayableInvoice(invoice) ||
-        payment.convertedAmount > this.invoiceBalanceForState(state, invoice)
+        this.settledTotalForState(state, invoice.id) + payment.convertedAmount >
+          this.invoiceTotal(invoice) + 0.01
       ) {
         return state;
       }
 
+      const allocated = this.allocateReference(state, 'PAG');
       const confirmedPayment: Payment = {
         ...payment,
         status: 'confirmed',
         confirmedAt: new Date().toISOString(),
+        documentReference: allocated.reference,
       };
-      return this.withSettlementStatus(
-        {
-          ...state,
-          payments: state.payments.map((candidate) =>
-            candidate.id === paymentId ? confirmedPayment : candidate,
-          ),
-        },
-        invoice.id,
+      return this.recomputeSalesOrderCompletion(
+        this.withSettlementStatus(
+          {
+            ...state,
+            counters: allocated.counters,
+            payments: state.payments.map((candidate) =>
+              candidate.id === paymentId ? confirmedPayment : candidate,
+            ),
+          },
+          invoice.id,
+        ),
+        invoice.orderId,
       );
     });
   }
@@ -606,7 +656,7 @@ export class LocalSalesCycleStore {
         (payment.status !== 'draft' && payment.status !== 'confirmed')
       )
         return state;
-      return this.withSettlementStatus(
+      const nextState = this.withSettlementStatus(
         {
           ...state,
           payments: state.payments.map((candidate) =>
@@ -617,16 +667,62 @@ export class LocalSalesCycleStore {
         },
         payment.invoiceId,
       );
+      const invoice = nextState.invoices.find(
+        (candidate) => candidate.id === payment.invoiceId,
+      );
+      return invoice
+        ? this.recomputeSalesOrderCompletion(nextState, invoice.orderId)
+        : nextState;
     });
   }
 
   private updateState(
     update: (state: SalesCycleState) => SalesCycleState,
   ): void {
-    const nextState = update(this.state());
-    if (nextState === this.state()) return;
-    this.state.set(nextState);
-    this.persist(nextState);
+    void this.mutate((state) => ({ state: update(state), result: undefined }));
+  }
+
+  /**
+   * Serializes same-origin browser writes with the Web Locks API. This local
+   * browser store has no cross-device or server-authoritative guarantee.
+   * Environments without `navigator.locks` execute synchronously, but do not
+   * receive a cross-tab serialization guarantee. A future Supabase repository
+   * will replace this explicit local-only seam.
+   */
+  private mutate<T>(
+    mutation: (state: SalesCycleState) => MutationResult<T>,
+  ): T | Promise<T> {
+    const commit = (): T => {
+      const current = this.readState();
+      const mutationResult = mutation(current);
+      if (mutationResult.state === current) {
+        this.state.set(current);
+        return mutationResult.result;
+      }
+      const next = {
+        ...mutationResult.state,
+        revision: current.revision + 1,
+      };
+      this.state.set(next);
+      this.persist(next);
+      this.channel?.postMessage({ revision: next.revision });
+      return mutationResult.result;
+    };
+    const locks = this.locks();
+    return locks
+      ? locks.request(LOCK_NAME, { mode: 'exclusive' }, commit)
+      : commit();
+  }
+
+  private allocateReference(
+    state: SalesCycleState,
+    counter: DocumentCounter,
+  ): { reference: string; counters: DocumentCounters } {
+    const value = state.counters[counter] + 1;
+    return {
+      reference: `${counter}-${value.toString().padStart(6, '0')}`,
+      counters: { ...state.counters, [counter]: value },
+    };
   }
 
   private salesOrderId(): SalesOrderId {
@@ -651,18 +747,34 @@ export class LocalSalesCycleStore {
       );
       if (!invoice || !this.canTransitionInvoice(invoice.status, targetStatus))
         return state;
+      const allocated =
+        targetStatus === 'published'
+          ? this.allocateReference(state, 'FAC')
+          : undefined;
       return {
-        ...state,
-        invoices: state.invoices.map((candidate) => {
-          if (candidate.id !== invoiceId) return candidate;
-          if (targetStatus !== 'published')
-            return { ...candidate, status: targetStatus };
-          return {
-            ...candidate,
-            ...this.publicationSnapshot(state, candidate),
-            status: targetStatus,
-          };
-        }),
+        ...this.recomputeSalesOrderCompletion(
+          {
+            ...state,
+            counters: allocated?.counters ?? state.counters,
+            invoices: state.invoices.map((candidate) => {
+              if (candidate.id !== invoiceId) return candidate;
+              if (targetStatus !== 'published')
+                return { ...candidate, status: targetStatus };
+              return {
+                ...candidate,
+                ...this.publicationSnapshot(
+                  state,
+                  candidate,
+                  undefined,
+                  allocated?.reference,
+                ),
+                reference: allocated?.reference ?? candidate.reference,
+                status: targetStatus,
+              };
+            }),
+          },
+          invoice.orderId,
+        ),
       };
     });
   }
@@ -700,7 +812,7 @@ export class LocalSalesCycleStore {
       ['USD', 'VES', 'EUR'].includes(input.currency) &&
       Number.isFinite(input.amount) &&
       input.amount > 0 &&
-      /^\d{4}-\d{2}-\d{2}$/.test(input.paymentDate) &&
+      this.isValidDate(input.paymentDate) &&
       ['cash', 'bank transfer', 'mobile payment', 'zelle'].includes(
         input.method,
       ) &&
@@ -708,6 +820,126 @@ export class LocalSalesCycleStore {
       (input.adjustedRate === undefined ||
         (Number.isFinite(input.adjustedRate) && input.adjustedRate > 0))
     );
+  }
+
+  private isValidSalesOrderInput(input: {
+    customerName: string;
+    currency: CurrencyCode;
+    orderDate?: string;
+    lines: DocumentLine[];
+  }): boolean {
+    return (
+      typeof input.customerName === 'string' &&
+      input.customerName.trim().length > 0 &&
+      ['USD', 'VES', 'EUR'].includes(input.currency) &&
+      (input.orderDate === undefined || this.isValidDate(input.orderDate)) &&
+      Array.isArray(input.lines) &&
+      input.lines.every(
+        (line) =>
+          typeof line.productId === 'string' &&
+          typeof line.description === 'string' &&
+          line.description.trim().length > 0 &&
+          Number.isInteger(line.quantity) &&
+          line.quantity > 0 &&
+          Number.isFinite(line.unitPrice) &&
+          line.unitPrice >= 0,
+      )
+    );
+  }
+
+  private isValidDate(date: string): boolean {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+    const parsed = new Date(`${date}T00:00:00.000Z`);
+    return (
+      !Number.isNaN(parsed.valueOf()) &&
+      parsed.toISOString().slice(0, 10) === date
+    );
+  }
+
+  private shippedQuantitiesBySource(
+    delivery: Delivery,
+    shipment: DocumentLine[],
+  ): Map<string, number> | undefined {
+    if (shipment.length !== delivery.lines.length) return undefined;
+    const expected = new Map(
+      delivery.lines.map((line) => [line.sourceLineId, line]),
+    );
+    const shipped = new Map<string, number>();
+    for (const line of shipment) {
+      const expectedLine = expected.get(line.sourceLineId);
+      if (
+        !line.sourceLineId ||
+        !expectedLine ||
+        shipped.has(line.sourceLineId) ||
+        line.productId !== expectedLine.productId ||
+        !Number.isInteger(line.quantity) ||
+        line.quantity <= 0 ||
+        line.quantity > expectedLine.quantity
+      )
+        return undefined;
+      shipped.set(line.sourceLineId, line.quantity);
+    }
+    return shipped.size === expected.size ? shipped : undefined;
+  }
+
+  private quantitiesBySource(lines: DocumentLine[]): Map<string, number> {
+    return lines.reduce((quantities, line) => {
+      if (!line.sourceLineId) return quantities;
+      quantities.set(
+        line.sourceLineId,
+        (quantities.get(line.sourceLineId) ?? 0) + line.quantity,
+      );
+      return quantities;
+    }, new Map<string, number>());
+  }
+
+  private recomputeSalesOrderCompletion(
+    state: SalesCycleState,
+    orderId: SalesOrderId,
+  ): SalesCycleState {
+    const order = state.salesOrders.find(
+      (candidate) => candidate.id === orderId,
+    );
+    if (!order || order.status === 'draft' || order.status === 'cancelled')
+      return state;
+    const deliveredBySource = this.quantitiesBySource(
+      state.deliveries
+        .filter(
+          (delivery) =>
+            delivery.orderId === orderId && delivery.status === 'validated',
+        )
+        .flatMap((delivery) => delivery.lines),
+    );
+    const invoicedBySource = this.quantitiesBySource(
+      state.invoices
+        .filter(
+          (invoice) =>
+            invoice.orderId === orderId && invoice.status !== 'voided',
+        )
+        .flatMap((invoice) => invoice.lines),
+    );
+    const nonVoidedInvoices = state.invoices.filter(
+      (invoice) => invoice.orderId === orderId && invoice.status !== 'voided',
+    );
+    const completed =
+      order.lines.length > 0 &&
+      order.lines.every(
+        (line) =>
+          (deliveredBySource.get(line.sourceLineId ?? '') ?? 0) ===
+            line.quantity &&
+          (invoicedBySource.get(line.sourceLineId ?? '') ?? 0) ===
+            line.quantity,
+      ) &&
+      nonVoidedInvoices.length > 0 &&
+      nonVoidedInvoices.every((invoice) => invoice.status === 'paid');
+    return {
+      ...state,
+      salesOrders: state.salesOrders.map((candidate) =>
+        candidate.id === orderId
+          ? { ...candidate, status: completed ? 'completed' : 'confirmed' }
+          : candidate,
+      ),
+    };
   }
 
   private canCancelSalesOrderForState(
@@ -800,7 +1032,7 @@ export class LocalSalesCycleStore {
       return state;
     const balance = this.invoiceBalanceForState(state, invoice);
     const status: InvoiceStatus =
-      balance <= 0
+      balance <= 0.01
         ? 'paid'
         : balance < this.invoiceTotal(invoice)
           ? 'partial'
@@ -842,6 +1074,7 @@ export class LocalSalesCycleStore {
     state: SalesCycleState,
     invoice: Invoice,
     issueDate = new Date().toISOString().slice(0, 10),
+    documentNumber?: string,
   ): Pick<
     Invoice,
     | 'number'
@@ -865,7 +1098,7 @@ export class LocalSalesCycleStore {
           )
         : undefined;
     return {
-      number: this.nextInvoiceNumber(state, issueDate),
+      number: documentNumber ?? this.nextInvoiceNumber(state, issueDate),
       issueDate,
       issuedCurrency: invoice.currency,
       vesFxRate: vesRate?.rateToUsd,
@@ -981,10 +1214,6 @@ export class LocalSalesCycleStore {
     }, new Map<ProductId, number>());
   }
 
-  private reference(prefix: string): string {
-    return `${prefix}-${new Date().getFullYear()}-${this.identifier().slice(-6).toUpperCase()}`;
-  }
-
   private identifier(): string {
     return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   }
@@ -1004,9 +1233,18 @@ export class LocalSalesCycleStore {
           : [this.defaultWarehouse(inventory)],
         inventory,
       );
+      const salesOrders = (state.salesOrders ?? []).map((order) => ({
+        ...order,
+        orderDate: order.orderDate ?? order.createdAt.slice(0, 10),
+        lines: (order.lines ?? []).map((line, index) => ({
+          ...line,
+          sourceLineId:
+            line.sourceLineId ?? `legacy:order:${order.id}:line:${index}`,
+        })),
+      }));
       const deliveries: Delivery[] = (state.deliveries ?? []).map(
         (delivery) => {
-          const order = state.salesOrders?.find(
+          const order = salesOrders.find(
             (candidate) => candidate.id === delivery.orderId,
           );
           const warehouse =
@@ -1021,26 +1259,40 @@ export class LocalSalesCycleStore {
               'Customer unavailable',
             warehouseId: warehouse.id,
             warehouseName: warehouse.name,
+            reference:
+              delivery.reference?.trim() || `legacy:delivery:${delivery.id}`,
+            lines: (delivery.lines ?? []).map((line, index) => ({
+              ...line,
+              sourceLineId:
+                line.sourceLineId ??
+                order?.lines.find(
+                  (orderLine) => orderLine.productId === line.productId,
+                )?.sourceLineId ??
+                `legacy:delivery:${delivery.id}:line:${index}`,
+            })),
           };
         },
       );
+      const invoices = this.migrateInvoices(
+        state.invoices ?? [],
+        deliveries,
+        state.exchangeRates ?? [],
+      );
       const migratedState = {
         ...state,
+        revision:
+          Number.isSafeInteger(state.revision) && (state.revision ?? -1) >= 0
+            ? state.revision
+            : 0,
+        counters: this.migrateCounters(state, invoices),
         inventory,
         warehouses,
-        salesOrders: (state.salesOrders ?? []).map((order) => ({
-          ...order,
-          orderDate: order.orderDate ?? order.createdAt.slice(0, 10),
-        })),
+        salesOrders,
         deliveries,
-        invoices: this.migrateInvoices(
-          state.invoices ?? [],
-          deliveries,
-          state.exchangeRates ?? [],
-        ),
+        invoices,
         payments: this.migratePayments(
           state.payments ?? [],
-          state.invoices ?? [],
+          invoices,
           state.exchangeRates ?? [],
         ),
         exchangeRates: state.exchangeRates ?? [],
@@ -1086,7 +1338,20 @@ export class LocalSalesCycleStore {
       const lines = (
         (invoice.lines ?? []) as Array<DocumentLine | InvoiceLine>
       ).flatMap((line) => {
-        if (this.isInvoiceLine(line)) return [line];
+        if (this.isInvoiceLine(line)) {
+          const delivery = deliveries.find(
+            (candidate) => candidate.id === line.deliveryId,
+          );
+          return [
+            {
+              ...line,
+              sourceLineId:
+                line.sourceLineId ??
+                delivery?.lines[line.deliveryLineIndex]?.sourceLineId ??
+                `legacy:invoice:${invoice.id}:line:${line.deliveryLineIndex}`,
+            },
+          ];
+        }
         let remaining = line.quantity;
         const allocated: InvoiceLine[] = [];
         const sources = deliveries.filter(
@@ -1131,6 +1396,8 @@ export class LocalSalesCycleStore {
           migrated,
           this.publicationSnapshot(
             {
+              revision: 0,
+              counters: { SO: 0, DES: 0, FAC: 0, PAG: 0 },
               salesOrders: [],
               deliveries,
               invoices: [...typedInvoices, ...migratedById.values()],
@@ -1243,6 +1510,39 @@ export class LocalSalesCycleStore {
     );
   }
 
+  private migrateCounters(
+    state: Partial<SalesCycleState>,
+    invoices: Invoice[],
+  ): DocumentCounters {
+    const legacyCounters = state.counters ?? { SO: 0, DES: 0, FAC: 0, PAG: 0 };
+    const references = [
+      ...(state.salesOrders ?? []).map((order) => order.reference),
+      ...(state.deliveries ?? []).map((delivery) => delivery.reference),
+      ...invoices.flatMap((invoice) => [invoice.reference, invoice.number]),
+      ...(state.payments ?? []).map((payment) => payment.documentReference),
+    ];
+    return (['SO', 'DES', 'FAC', 'PAG'] as const).reduce(
+      (counters, counter) => ({
+        ...counters,
+        [counter]: Math.max(
+          legacyCounters[counter] ?? 0,
+          ...references.map((reference) =>
+            this.referenceSequence(reference, counter),
+          ),
+        ),
+      }),
+      { SO: 0, DES: 0, FAC: 0, PAG: 0 },
+    );
+  }
+
+  private referenceSequence(
+    reference: string | undefined,
+    counter: DocumentCounter,
+  ): number {
+    const match = reference?.match(new RegExp(`^${counter}-(\\d{6})$`));
+    return match ? Number(match[1]) : 0;
+  }
+
   private seedState(): SalesCycleState {
     const inventory: InventoryItem[] = [
       {
@@ -1271,6 +1571,8 @@ export class LocalSalesCycleStore {
       },
     ];
     const state: SalesCycleState = {
+      revision: 0,
+      counters: { SO: 0, DES: 0, FAC: 0, PAG: 0 },
       salesOrders: [],
       deliveries: [],
       invoices: [],
@@ -1327,6 +1629,19 @@ export class LocalSalesCycleStore {
 
   private persist(state: SalesCycleState): void {
     this.storage()?.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  private refreshFromStorage(): void {
+    this.state.set(this.readState());
+  }
+
+  private createChannel(): BroadcastChannel | undefined {
+    if (typeof BroadcastChannel === 'undefined') return undefined;
+    return new BroadcastChannel(STORAGE_KEY);
+  }
+
+  private locks(): LockManager | undefined {
+    return typeof navigator === 'undefined' ? undefined : navigator.locks;
   }
 
   private storage(): Storage | undefined {

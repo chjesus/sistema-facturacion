@@ -22,6 +22,8 @@ export interface DocumentLine {
   description: string;
   quantity: number;
   unitPrice: number;
+  /** Stable origin identifier used to trace a line through downstream documents. */
+  sourceLineId?: string;
 }
 
 export interface SalesOrder {
@@ -93,6 +95,8 @@ export interface InvoiceLine extends DocumentLine {
 export interface Payment {
   id: string;
   reference: string;
+  /** System-assigned receipt reference, allocated only on confirmation. */
+  documentReference?: string;
   invoiceId: InvoiceId;
   invoiceReference: string;
   status: PaymentStatus;

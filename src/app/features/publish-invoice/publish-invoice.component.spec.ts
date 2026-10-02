@@ -27,7 +27,7 @@ describe('PublishInvoiceComponent', () => {
       status: 'published',
       issuedCurrency: 'USD',
     });
-    expect(store.invoices()[0].number).toMatch(/^INV-\d{4}-\d{6}$/);
+    expect(store.invoices()[0].number).toMatch(/^FAC-\d{6}$/);
     expect(store.invoices()[0].vesFxRate).toBeGreaterThan(0);
   });
 });

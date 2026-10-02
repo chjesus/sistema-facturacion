@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { vi } from 'vitest';
 import { LocalSalesCycleStore } from './local-sales-cycle-store.service';
 
 describe('LocalSalesCycleStore', () => {
@@ -254,7 +255,7 @@ describe('LocalSalesCycleStore', () => {
     store.cancelSalesOrder(confirmed.id);
     expect(
       store.salesOrders().find((order) => order.id === confirmed.id)?.status,
-    ).toBe('completed');
+    ).toBe('confirmed');
   });
 
   it('validates a pending delivery once and deducts its exact quantities from inventory', () => {
@@ -279,7 +280,7 @@ describe('LocalSalesCycleStore', () => {
     store.validateDelivery(delivery.id);
 
     expect(store.deliveries()[0].status).toBe('validated');
-    expect(store.salesOrders()[0].status).toBe('completed');
+    expect(store.salesOrders()[0].status).toBe('confirmed');
     expect(
       store.inventory().find((item) => item.id === product.id)
         ?.availableQuantity,
@@ -445,7 +446,7 @@ describe('LocalSalesCycleStore', () => {
     expect(
       store.salesOrders().find((candidate) => candidate.id === order.id)
         ?.status,
-    ).toBe('completed');
+    ).toBe('confirmed');
     expect(
       store
         .deliveries()
@@ -700,8 +701,8 @@ describe('LocalSalesCycleStore', () => {
     expect(voided.vesFxRate).toBeGreaterThan(0);
     expect(voided.vesFxDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(voided.vesEquivalentTotal).toBeGreaterThan(0);
-    expect(firstNumber).toMatch(/^INV-\d{4}-000001$/);
-    expect(republished.number).toMatch(/^INV-\d{4}-000002$/);
+    expect(firstNumber).toBe('FAC-000001');
+    expect(republished.number).toBe('FAC-000002');
     expect(store.invoiceTotals(republished)).toEqual({
       subtotal: 100,
       vat: 16,
@@ -774,6 +775,553 @@ describe('LocalSalesCycleStore', () => {
     store.voidPayment(eur.id);
     expect(store.invoices()[0].status).toBe('partial');
     expect(store.invoiceBalance(store.invoices()[0])).toBe(76);
+  });
+
+  it('rejects duplicate-product shipments that exceed a source line or aggregated warehouse stock', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 2,
+          unitPrice: 10,
+        },
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 3,
+          unitPrice: 10,
+        },
+      ],
+    });
+    store.confirmSalesOrder(order.id);
+    const delivery = store.deliveries()[0];
+
+    store.validateDelivery(delivery.id, [
+      { ...delivery.lines[0], quantity: 3 },
+      { ...delivery.lines[1], quantity: 2 },
+    ]);
+
+    expect(store.deliveries()[0].status).toBe('pending');
+    expect(store.warehouseStock(delivery.warehouseId, product.id)).toBe(17);
+
+    const oversized = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 10,
+          unitPrice: 10,
+        },
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 10,
+          unitPrice: 10,
+        },
+      ],
+    });
+    store.confirmSalesOrder(oversized.id);
+    const stockBoundDelivery = store.deliveries()[0];
+    store.validateDelivery(stockBoundDelivery.id);
+
+    expect(store.deliveries()[0].status).toBe('pending');
+    expect(
+      store.warehouseStock(stockBoundDelivery.warehouseId, product.id),
+    ).toBe(17);
+  });
+
+  it('reserves validated delivery lines in non-voided drafts without exceeding provenance', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 2,
+          unitPrice: 10,
+        },
+      ],
+    });
+    store.confirmSalesOrder(order.id);
+    store.validateDelivery(store.deliveries()[0].id);
+    const draft = store.createInvoiceFromOrder(order.id)!;
+
+    expect(store.createInvoiceFromOrder(order.id)).toBeUndefined();
+    store.voidInvoice(draft.id);
+    expect(store.invoiceEligibility(order.id)?.lines[0].quantity).toBe(2);
+  });
+
+  it('settles only confirmed payments and completes orders only after paid invoices', () => {
+    const invoice = publishedInvoice('USD', 100);
+    const orderId = invoice.orderId;
+    const firstDraft = store.createPayment(
+      paymentInput(invoice.id, 'USD', 60),
+    )!;
+    const secondDraft = store.createPayment(
+      paymentInput(invoice.id, 'USD', 60),
+    )!;
+
+    expect(
+      store.salesOrders().find((order) => order.id === orderId)?.status,
+    ).toBe('confirmed');
+    store.confirmPayment(firstDraft.id);
+    store.confirmPayment(secondDraft.id);
+
+    expect(
+      store.payments().find((payment) => payment.id === secondDraft.id)?.status,
+    ).toBe('draft');
+    expect(store.invoiceSettledTotal(invoice.id)).toBe(60);
+
+    const finalPayment = store.createPayment(
+      paymentInput(invoice.id, 'USD', 56),
+    )!;
+    store.confirmPayment(finalPayment.id);
+    expect(
+      store.salesOrders().find((order) => order.id === orderId)?.status,
+    ).toBe('completed');
+
+    store.voidPayment(finalPayment.id);
+    expect(
+      store.salesOrders().find((order) => order.id === orderId)?.status,
+    ).toBe('confirmed');
+
+    store.voidInvoice(invoice.id);
+    expect(
+      store.salesOrders().find((order) => order.id === orderId)?.status,
+    ).toBe('confirmed');
+  });
+
+  it('persists monotonic revisions, durable references, and line provenance', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 1,
+          unitPrice: 100,
+        },
+      ],
+    });
+    store.confirmSalesOrder(order.id);
+    store.validateDelivery(store.deliveries()[0].id);
+    const invoice = store.createInvoiceFromOrder(order.id)!;
+    store.publishInvoice(invoice.id);
+    const payment = store.createPayment(paymentInput(invoice.id, 'USD', 116))!;
+    store.confirmPayment(payment.id);
+
+    const persisted = JSON.parse(
+      localStorage.getItem('sales-cycle-state-v1') ?? '{}',
+    );
+    expect(order.reference).toBe('SO-000001');
+    expect(store.deliveries()[0].reference).toBe('DES-000001');
+    expect(store.invoices()[0].number).toBe('FAC-000001');
+    expect(store.payments()[0].documentReference).toBe('PAG-000001');
+    expect(store.invoices()[0].lines[0].sourceLineId).toBe(
+      order.lines[0].sourceLineId,
+    );
+    expect(persisted).toMatchObject({
+      revision: expect.any(Number),
+      counters: { SO: 1, DES: 1, FAC: 1, PAG: 1 },
+    });
+    expect(persisted.revision).toBeGreaterThan(0);
+  });
+
+  it('migrates legacy document lines without replacing their references', () => {
+    localStorage.setItem(
+      'sales-cycle-state-v1',
+      JSON.stringify({
+        salesOrders: [
+          {
+            id: 'so-legacy',
+            reference: 'SO-LEGACY',
+            customerName: 'Legacy Customer',
+            status: 'confirmed',
+            currency: 'USD',
+            lines: [
+              {
+                productId: 'desk-lamp',
+                description: 'Arc Desk Lamp',
+                quantity: 1,
+                unitPrice: 10,
+              },
+            ],
+            createdAt: '2026-10-01T00:00:00.000Z',
+          },
+        ],
+        deliveries: [
+          {
+            id: 'delivery-legacy',
+            reference: 'OUT-LEGACY',
+            orderId: 'so-legacy',
+            orderReference: 'SO-LEGACY',
+            status: 'validated',
+            lines: [
+              {
+                productId: 'desk-lamp',
+                description: 'Arc Desk Lamp',
+                quantity: 1,
+                unitPrice: 10,
+              },
+            ],
+            createdAt: '2026-10-01T00:00:00.000Z',
+          },
+        ],
+        invoices: [],
+        payments: [],
+        inventory: [],
+        exchangeRates: [],
+      }),
+    );
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({});
+    const legacyStore = TestBed.inject(LocalSalesCycleStore);
+
+    expect(legacyStore.salesOrders()[0]).toMatchObject({
+      reference: 'SO-LEGACY',
+      lines: [{ sourceLineId: 'legacy:order:so-legacy:line:0' }],
+    });
+    expect(legacyStore.deliveries()[0]).toMatchObject({
+      reference: 'OUT-LEGACY',
+      lines: [{ sourceLineId: 'legacy:order:so-legacy:line:0' }],
+    });
+    expect(
+      JSON.parse(localStorage.getItem('sales-cycle-state-v1') ?? '{}'),
+    ).toMatchObject({
+      revision: 0,
+      counters: { SO: 0, DES: 0, FAC: 0, PAG: 0 },
+    });
+  });
+
+  it('re-reads shared state before stale delivery validation so stock stays nonnegative', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 2,
+          unitPrice: 10,
+        },
+      ],
+    });
+    store.confirmSalesOrder(order.id);
+    const staleReplica = new LocalSalesCycleStore();
+    const delivery = store.deliveries()[0];
+    const stockBefore = store.warehouseStock(delivery.warehouseId, product.id);
+
+    store.validateDelivery(delivery.id);
+    staleReplica.validateDelivery(delivery.id);
+
+    expect(store.warehouseStock(delivery.warehouseId, product.id)).toBe(
+      stockBefore - 2,
+    );
+    expect(
+      staleReplica.warehouseStock(delivery.warehouseId, product.id),
+    ).toBe(stockBefore - 2);
+    expect(
+      staleReplica.warehouses().every((warehouse) =>
+        warehouse.stock.every((item) => item.availableQuantity >= 0),
+      ),
+    ).toBe(true);
+  });
+
+  it('allocates unique durable sequences across interleaved local replicas', () => {
+    const replica = new LocalSalesCycleStore();
+    const product = store.inventory()[0];
+    const first = store.createSalesOrder({
+      customerName: 'First',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 1,
+          unitPrice: 10,
+        },
+      ],
+    });
+    const second = replica.createSalesOrder({
+      customerName: 'Second',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 1,
+          unitPrice: 10,
+        },
+      ],
+    });
+
+    store.confirmSalesOrder(first.id);
+    replica.confirmSalesOrder(second.id);
+
+    const persisted = JSON.parse(
+      localStorage.getItem('sales-cycle-state-v1') ?? '{}',
+    );
+    const orderReferences = persisted.salesOrders.map(
+      (order: { reference: string }) => order.reference,
+    );
+    const deliveryReferences = persisted.deliveries.map(
+      (delivery: { reference: string }) => delivery.reference,
+    );
+    expect(orderReferences).toEqual(
+      expect.arrayContaining(['SO-000001', 'SO-000002']),
+    );
+    expect(deliveryReferences).toEqual(
+      expect.arrayContaining(['DES-000001', 'DES-000002']),
+    );
+  });
+
+  it('preserves distinct provenance for duplicate product lines through delivery and invoice', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 1,
+          unitPrice: 10,
+        },
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 2,
+          unitPrice: 20,
+        },
+      ],
+    });
+    store.confirmSalesOrder(order.id);
+    const delivery = store.deliveries()[0];
+    store.validateDelivery(delivery.id);
+    const invoice = store.createInvoiceFromOrder(order.id)!;
+
+    expect(new Set(order.lines.map((line) => line.sourceLineId)).size).toBe(2);
+    expect(delivery.lines.map((line) => line.sourceLineId)).toEqual(
+      order.lines.map((line) => line.sourceLineId),
+    );
+    expect(invoice.lines.map((line) => line.sourceLineId)).toEqual(
+      order.lines.map((line) => line.sourceLineId),
+    );
+    expect(invoice.lines.map((line) => line.deliveryId)).toEqual([
+      delivery.id,
+      delivery.id,
+    ]);
+  });
+
+  it('enforces delivery and invoice source ceilings after an invalid repeated request', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 2,
+          unitPrice: 10,
+        },
+      ],
+    });
+    store.confirmSalesOrder(order.id);
+    const delivery = store.deliveries()[0];
+    const stockBefore = store.warehouseStock(delivery.warehouseId, product.id);
+
+    store.validateDelivery(delivery.id, [
+      { ...delivery.lines[0], quantity: 3 },
+    ]);
+    expect(store.deliveries()[0].status).toBe('pending');
+    expect(store.warehouseStock(delivery.warehouseId, product.id)).toBe(
+      stockBefore,
+    );
+
+    store.validateDelivery(delivery.id);
+    expect(store.createInvoiceFromOrder(order.id)).toBeDefined();
+    expect(store.createInvoiceFromOrder(order.id)).toBeUndefined();
+    expect(store.invoiceEligibility(order.id)).toBeUndefined();
+  });
+
+  it('converts mixed-currency settlement and accepts the 0.01 payment tolerance', () => {
+    const invoice = publishedInvoice('USD', 100);
+    const date = store
+      .exchangeRates()
+      .find((rate) => rate.currency === 'USD')!.date;
+    const vesPayment = store.createPayment(
+      paymentInput(invoice.id, 'VES', 38.5, { paymentDate: date }),
+    )!;
+    const tolerancePayment = store.createPayment(
+      paymentInput(invoice.id, 'USD', 114.99, { paymentDate: date }),
+    )!;
+
+    store.confirmPayment(vesPayment.id);
+    store.confirmPayment(tolerancePayment.id);
+
+    expect(store.payments().find((payment) => payment.id === vesPayment.id))
+      .toMatchObject({ convertedAmount: 1, frozenRate: 38.5 });
+    expect(store.invoiceSettledTotal(invoice.id)).toBe(115.99);
+    expect(store.invoiceBalance(store.invoices()[0])).toBe(0.01);
+    expect(store.invoices()[0].status).toBe('paid');
+  });
+
+  it('keeps confirmed, validated, and published document content immutable', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 1,
+          unitPrice: 100,
+        },
+      ],
+    });
+    store.confirmSalesOrder(order.id);
+    const delivery = store.deliveries()[0];
+    store.validateDelivery(delivery.id);
+    const invoice = store.createInvoiceFromOrder(order.id)!;
+    store.publishInvoice(invoice.id);
+    const published = store.invoices()[0];
+    const snapshot = {
+      lines: published.lines,
+      number: published.number,
+      issueDate: published.issueDate,
+      vesFxRate: published.vesFxRate,
+    };
+
+    store.updateSalesOrder({
+      id: order.id,
+      customerName: 'Changed',
+      currency: 'EUR',
+      orderDate: '2026-01-01',
+      lines: [],
+    });
+    store.updateDeliveryWarehouse(delivery.id, 'warehouse-west');
+    store.publishInvoice(invoice.id);
+
+    expect(store.salesOrders()[0]).toMatchObject({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [{ quantity: 1, unitPrice: 100 }],
+    });
+    expect(store.deliveries()[0]).toMatchObject({
+      warehouseId: 'warehouse-main',
+      status: 'validated',
+      lines: [{ quantity: 1, unitPrice: 100 }],
+    });
+    expect(store.invoices()[0]).toMatchObject(snapshot);
+  });
+
+  it('completes only after delivery, invoicing, and payment, then reverts after reversal', () => {
+    const product = store.inventory()[0];
+    const order = store.createSalesOrder({
+      customerName: 'Acme',
+      currency: 'USD',
+      lines: [
+        {
+          productId: product.id,
+          description: product.name,
+          quantity: 2,
+          unitPrice: 100,
+        },
+      ],
+    });
+    store.confirmSalesOrder(order.id);
+    const firstDelivery = store.deliveries()[0];
+    store.validateDelivery(firstDelivery.id, [
+      { ...firstDelivery.lines[0], quantity: 1 },
+    ]);
+    const firstInvoice = store.createInvoiceFromOrder(order.id)!;
+    store.publishInvoice(firstInvoice.id);
+    const firstPayment = store.createPayment(
+      paymentInput(firstInvoice.id, 'USD', 116),
+    )!;
+    store.confirmPayment(firstPayment.id);
+
+    expect(store.salesOrders()[0].status).toBe('confirmed');
+
+    const backorder = store
+      .deliveries()
+      .find((delivery) => delivery.parentDeliveryId === firstDelivery.id)!;
+    store.validateDelivery(backorder.id);
+    const finalInvoice = store.createInvoiceFromOrder(order.id)!;
+    store.publishInvoice(finalInvoice.id);
+    const finalPayment = store.createPayment(
+      paymentInput(finalInvoice.id, 'USD', 116),
+    )!;
+    store.confirmPayment(finalPayment.id);
+    expect(store.salesOrders()[0].status).toBe('completed');
+
+    store.voidPayment(finalPayment.id);
+    expect(store.salesOrders()[0].status).toBe('confirmed');
+    store.voidInvoice(finalInvoice.id);
+    expect(store.salesOrders()[0].status).toBe('confirmed');
+  });
+
+  it('uses navigator locks for browser mutations when they are available', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    const request = vi.fn(
+      async (_name: string, _options: LockOptions, callback: () => unknown) =>
+        callback(),
+    );
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: { request },
+    });
+
+    try {
+      const created = store.createSalesOrder({
+        customerName: 'Lock test',
+        currency: 'USD',
+        lines: [],
+      });
+      const order = await (created as unknown as Promise<{
+        reference: string;
+      }>);
+      expect(request).toHaveBeenCalledWith(
+        'sales-cycle-state-v1',
+        { mode: 'exclusive' },
+        expect.any(Function),
+      );
+      expect(order.reference).toBe('SO-000001');
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, 'locks', descriptor);
+      else Reflect.deleteProperty(navigator, 'locks');
+    }
+  });
+
+  it('uses a synchronous local fallback when the Web Locks API is unavailable', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    Reflect.deleteProperty(navigator, 'locks');
+
+    try {
+      const order = store.createSalesOrder({
+        customerName: 'Fallback test',
+        currency: 'USD',
+        lines: [],
+      });
+
+      expect(order).toMatchObject({ reference: 'SO-000001' });
+      expect(order).not.toHaveProperty('then');
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, 'locks', descriptor);
+    }
   });
 
   function publishedInvoice(

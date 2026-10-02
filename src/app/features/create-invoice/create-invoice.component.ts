@@ -19,6 +19,12 @@ export class CreateInvoiceComponent {
 
   protected createInvoice(): void {
     const invoice = this.store.createInvoiceFromOrder(this.orderId);
-    if (invoice) this.invoiceCreated.emit(invoice.id);
+    if (invoice instanceof Promise) {
+      void invoice.then((created) => {
+        if (created) this.invoiceCreated.emit(created.id);
+      });
+    } else if (invoice) {
+      this.invoiceCreated.emit(invoice.id);
+    }
   }
 }

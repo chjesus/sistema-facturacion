@@ -683,10 +683,11 @@ export class LocalSalesCycleStore {
   }
 
   /**
-   * Serializes same-origin writes with the Web Locks API. Environments without
-   * `navigator.locks` execute synchronously for deterministic tests, but do not
-   * receive a cross-tab serialization guarantee. This is the explicit seam a
-   * future Supabase repository will replace.
+   * Serializes same-origin browser writes with the Web Locks API. This local
+   * browser store has no cross-device or server-authoritative guarantee.
+   * Environments without `navigator.locks` execute synchronously, but do not
+   * receive a cross-tab serialization guarantee. A future Supabase repository
+   * will replace this explicit local-only seam.
    */
   private mutate<T>(
     mutation: (state: SalesCycleState) => MutationResult<T>,

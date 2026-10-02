@@ -1,12 +1,15 @@
 # Sales Cycle Frontend
 
 ## Objective
+
 Build a modern, minimal Angular frontend that models the complete sales cycle: sales order, warehouse delivery, invoice, and multi-currency payment.
 
 ## Problem and Why
+
 The base project is an uncustomized Angular starter. Users need four connected views where every downstream document originates from its predecessor and each transition is visible and enforceable.
 
 ## Authorized Scope
+
 - Replace the Angular starter UI.
 - Add only the four requested views: sales orders, deliveries, invoices, and payments.
 - Use simulated data persisted locally in the browser.
@@ -15,6 +18,7 @@ The base project is an uncustomized Angular starter. Users need four connected v
 - Do not create backend, authentication, inventory-management, customer-management, tax, or reporting screens.
 
 ## Architecture and Constraints
+
 - Use pragmatic FSD folders with Angular standalone components and lazy page routes.
 - Keep document state and transitions in typed entity services; avoid a global store unless needed.
 - Every delivery, invoice, and payment must retain its origin reference.
@@ -22,6 +26,7 @@ The base project is an uncustomized Angular starter. Users need four connected v
 - Delivery strategy: ask-on-risk. Target one coherent work-unit commit per task.
 
 ## Acceptance Criteria
+
 - Sales orders are created in draft, confirmed, completed, or cancelled; confirmation creates a pending delivery.
 - Deliveries originate from an order, can be validated or cancelled, and validation reduces warehouse stock.
 - Invoices originate from an order only for delivered, uninvoiced quantities and can become draft, published, partial, paid, or voided.
@@ -35,8 +40,10 @@ The base project is an uncustomized Angular starter. Users need four connected v
 - Invoices originate only from validated, uninvoiced delivery quantities; publication assigns an immutable date, sequential number, and latest available VES FX snapshot, while paid/balance and payment eligibility remain visible.
 - Payments originate only from a published or partial invoice with a positive balance, store payment date/method/reference, use the latest rate on or before that date with optional adjustment, and freeze their conversion when confirmed.
 - UI composition follows pragmatic FSD boundaries: routing pages compose widgets/features, transactional entities remain stable, and reusable visual primitives/styles use Tailwind v4 without visual regression.
+- Angular templates follow an 80-character readability standard through Prettier and Angular ESLint, with complex workflow templates externalized while behavior and Tailwind classes remain unchanged.
 
 ## Work Plan
+
 - [x] SC-01 — Create the FSD shell, navigation, typed domain models, local persistence, seeded inventory, and FX history. Route: delegated; trigger: preparation and multi-file implementation. Checks: `npm test` passed (1 file, 2 tests); `npm run build` passed (initial bundle: 230.53 kB; four lazy page chunks). Files: `src/app/app.{ts,html,css}`, `src/app/app.routes.ts`, `src/app/app.spec.ts`, `src/styles.css`, `src/app/entities/**`, `src/app/pages/**`. Commit: `43cde69f40b61dbad856db8ce0931e541c6cafbe`.
 - [x] SC-02 — Implemented the sales-orders view and confirmation flow that creates one pending linked delivery. Checks: `npm test` passed (2 files, 4 tests); `npm run build` passed (initial bundle: 252.52 kB; sales-orders lazy chunk: 50.03 kB). Files: `src/app/pages/sales-orders/sales-orders.page.ts`, `src/app/entities/sales/api/local-sales-cycle-store.service.ts`, `src/app/entities/sales/api/local-sales-cycle-store.service.spec.ts`, `src/app/entities/sales/model/sales.models.ts`, `src/app/entities/inventory/model/inventory.models.ts`. Commit: `feat(sales-cycle): implement sales orders`.
 - [x] SC-03 — Implemented the deliveries list/detail view, source-order links, pending quantities, validation/cancellation transitions, and idempotent warehouse stock deduction. Checks: `npm test` passed (2 files, 6 tests); `npm run build` passed (initial bundle: 252.65 kB; deliveries lazy chunk: 6.72 kB). Files: `src/app/pages/deliveries/deliveries.page.ts`, `src/app/entities/sales/api/local-sales-cycle-store.service.ts`, `src/app/entities/sales/api/local-sales-cycle-store.service.spec.ts`. Commit: `feat(sales-cycle): implement deliveries`.
@@ -53,6 +60,42 @@ The base project is an uncustomized Angular starter. Users need four connected v
 - [x] SC-14 — Refactored Invoices into a composing page, `invoice-workspace` widget, and focused invoice creation/publication/void/payment-navigation features using shared UI and Tailwind v4 utilities. Preserved validated-delivery eligibility, source provenance, VAT/totals, sequential immutable publication snapshots, void rules, balance/payment eligibility, selection, responsiveness, and routes without changing transactional entities or financial rules. Added focused page, widget, creation, publication, void, and payment-navigation boundary coverage. Checks: `npm test -- --watch=false` passed (17 files, 45 tests); `npm run build` passed (initial bundle: 264.30 kB; invoices lazy chunk: 9.71 kB). Commit: `f1fcb06`.
 - [x] SC-15 — Refactored Payments into a route-context page, `payment-workspace` and `payment-history` widgets, and focused registration/confirmation/void features using shared UI and Tailwind v4 utilities. Preserved payable-invoice-only access, dated multi-currency conversion previews, optional rate adjustment, frozen snapshots, validation, responsive layout, and draft/confirm/void transitions without changing transactional entities or business rules. Checks: `npm test -- --watch=false` passed (20 files, 48 tests); `npm run build` passed (initial bundle: 264.61 kB; payments lazy chunk: 10.63 kB). Files: `src/app/pages/payments/**`, `src/app/features/{register-payment,confirm-payment,void-payment}/**`, `src/app/widgets/{payment-workspace,payment-history}/**`, `odd/tasks/sales-cycle.md`. Commit: `6b63dd4`.
 - [x] SC-16 — Audited FSD dependency boundaries and Tailwind v4 visual utilities. Removed the remaining transactional entity lookup from the payments route page by moving payable-invoice resolution into `payment-workspace`; route pages now compose shared UI, widgets, and features only. No widget or feature imports a page, shared imports no upper FSD layer, transactional entity files remain unchanged, and no route page declares inline `styles: []`. Tailwind v4 is imported once from `src/styles.css`; shared tokens live in `shared/styles/theme.css`, whose only global effect is the intended `@layer base` root palette, typeface, and canvas defaults. Checks: `npm test -- --watch=false` passed (20 files, 48 tests); `npm run build` passed (initial bundle: 264.64 kB; four lazy route chunks); `git diff --check` passed. Files: `src/app/pages/payments/payments.page.ts`, `src/app/widgets/payment-workspace/payment-workspace.component.ts`, `odd/tasks/sales-cycle.md`. Commit: `2d7d48a`.
+- [x] SC-17 — Configured Prettier's 80-column Angular-template formatting and
+      Angular ESLint enforcement. Final verification: `npm run format:check` passed
+      (all matched templates); `npm run lint` passed (all files); `npm test --
+      --watch=false` passed (20 files, 48 tests); `npm run build` passed (initial
+      bundle: 264.64 kB); `git diff --check` passed. Commit: `987ec38`.
+- [x] SC-18 — Externalized and formatted Sales Order feature, workspace, and
+      page-shell templates with unchanged bindings, control flow, events, semantics,
+      and Tailwind classes. Final verification: `npm run format:check` passed (all
+      matched templates); `npm run lint` passed (all files); `npm test --
+      --watch=false` passed (20 files, 48 tests); `npm run build` passed
+      (sales-orders lazy chunk: 11.63 kB); `git diff --check` passed. Commit:
+      `987ec38`.
+- [x] SC-19 — Externalized and formatted Delivery feature, workspace, and
+      route-shell templates with unchanged DOM semantics, bindings, events, control
+      flow, Tailwind classes, visual design, and delivery behavior. Replaced unsafe
+      test access with DOM interactions. Final verification: `npm run format:check`
+      passed (all matched templates); `npm run lint` passed (all files); `npm test
+      -- --watch=false` passed (20 files, 48 tests); `npm run build` passed
+      (deliveries lazy chunk: 8.60 kB); `git diff --check` passed. Commit:
+      `987ec38`.
+- [x] SC-20 — Externalized and formatted Invoice and Payment feature, workspace,
+      history, registration, and route-shell templates with unchanged bindings,
+      control flow, events, semantics, Tailwind classes, and visual design. Replaced
+      unsafe test access with DOM interactions. Final verification: `npm run
+      format:check` passed (all matched templates); `npm run lint` passed (all
+      files); `npm test -- --watch=false` passed (20 files, 48 tests); `npm run
+      build` passed (invoices: 9.79 kB; payments: 10.68 kB); `git diff --check`
+      passed. Commit: `987ec38`.
+- [x] SC-21 — Formatted the remaining application, shared UI, and action templates;
+      formatted the local sales-cycle store and its specification for readability;
+      removed the unused specification variable; and retained narrow test types.
+      Final verification: `npm run format:check` passed (all matched templates);
+      `npm run lint` passed (all files); `npm test -- --watch=false` passed (20
+      files, 48 tests); `npm run build` passed (initial bundle: 264.64 kB); `git
+      diff --check` passed. Commit: `987ec38`.
 
 ## Progress and Next Step
-SC-01 through SC-16 are completed on branch `feature/fsd-tailwind-refactor`. Presentation composition now follows pragmatic FSD with Tailwind v4 shared tokens/primitives while retaining the protected transactional store. Payments originate from payable invoices through Register Payment, resolve payment and invoice FX rates on or before the payment date, and retain frozen history or adjusted snapshots through confirmation and voiding. Invoice issuance occurs at publication using the latest available VES rate dated on or before issue date; voided invoices retain their assigned number. Sales-order monetary values use a fixed 16% VAT rate. Engram mirror remains pending because multiple active runtime sessions prevent an unambiguous write. Receipt-driven development is disabled for this clone by user authorization after the native review flow rejected its negotiated continuation; delivery remains unmanaged under ordinary repository policy.
+
+SC-01 through SC-16 are completed on branch `refactor/angular-template-readability`. SC-17 through SC-21 will enforce readable Angular templates with Prettier/Angular ESLint and externalized complex markup. Presentation composition follows pragmatic FSD with Tailwind v4 shared tokens/primitives while retaining the protected transactional store. Payments originate from payable invoices through Register Payment, resolve payment and invoice FX rates on or before the payment date, and retain frozen history or adjusted snapshots through confirmation and voiding. Invoice issuance occurs at publication using the latest available VES rate dated on or before issue date; voided invoices retain their assigned number. Sales-order monetary values use a fixed 16% VAT rate. Engram mirror remains pending because multiple active runtime sessions prevent an unambiguous write. Receipt-driven development is disabled for this clone by user authorization after the native review flow rejected its negotiated continuation; delivery remains unmanaged under ordinary repository policy.

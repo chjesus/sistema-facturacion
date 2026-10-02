@@ -50,6 +50,10 @@ export interface Delivery {
   reference: string;
   orderId: SalesOrderId;
   orderReference: string;
+  customerName: string;
+  warehouseId: string;
+  warehouseName: string;
+  parentDeliveryId?: DeliveryId;
   status: DeliveryStatus;
   lines: DocumentLine[];
   createdAt: string;

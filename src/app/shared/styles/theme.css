@@ -1,0 +1,25 @@
+@theme {
+  --color-ink: #172036;
+  --color-muted: #6d7485;
+  --color-border: #e7e9ee;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f5f7fa;
+  --color-accent: #4f46e5;
+  --color-canvas: #fbfcfe;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --radius-panel: 16px;
+}
+
+@layer base {
+  :root {
+    --ink: var(--color-ink);
+    --muted: var(--color-muted);
+    --border: var(--color-border);
+    --surface: var(--color-surface);
+    --surface-muted: var(--color-surface-muted);
+    --accent: var(--color-accent);
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+  }
+}

@@ -1,0 +1,120 @@
+<app-panel
+  label="Create draft order"
+  class="block self-start"
+>
+  <h2 class="mb-4 text-xl font-bold tracking-[-.03em] text-ink">
+    Create draft order
+  </h2>
+  <form
+    class="grid gap-3"
+    (ngSubmit)="createOrder()"
+  >
+    <app-form-field label="Customer">
+      <input
+        class="rounded-lg border border-border bg-white px-3 py-2.5 text-ink"
+        name="customer"
+        [(ngModel)]="customerName"
+        placeholder="Customer name"
+        required
+      />
+    </app-form-field>
+    <div class="grid gap-3 sm:grid-cols-2">
+      <app-form-field label="Order date">
+        <input
+          class="rounded-lg border border-border bg-white px-3 py-2.5 text-ink"
+          name="orderDate"
+          [(ngModel)]="orderDate"
+          type="date"
+          required
+        />
+      </app-form-field>
+      <app-form-field label="Currency">
+        <select
+          class="rounded-lg border border-border bg-white px-3 py-2.5 text-ink"
+          name="currency"
+          [(ngModel)]="currency"
+        >
+          <option value="USD">USD</option>
+          <option value="VES">VES</option>
+          <option value="EUR">EUR</option>
+        </select>
+      </app-form-field>
+    </div>
+    <div
+      class="grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,.45fr)_max-content]"
+    >
+      <app-form-field
+        label="Product"
+        class="min-w-0"
+      >
+        <select
+          class="box-border min-w-0 w-full rounded-lg border border-border bg-white px-3 py-2.5 text-ink"
+          name="product"
+          [(ngModel)]="selectedProductId"
+        >
+          @for (item of store.inventory(); track item.id) {
+            <option [value]="item.id">{{ item.name }} · {{ item.sku }}</option>
+          }
+        </select>
+      </app-form-field>
+      <app-form-field
+        label="Quantity"
+        class="min-w-0"
+      >
+        <input
+          class="box-border min-w-0 w-full rounded-lg border border-border bg-white px-3 py-2.5 text-ink"
+          name="quantity"
+          [(ngModel)]="quantity"
+          type="number"
+          min="1"
+        />
+      </app-form-field>
+      <app-button
+        type="button"
+        variant="secondary"
+        class="whitespace-nowrap"
+        (click)="addLine()"
+      >
+        Add line
+      </app-button>
+    </div>
+    <p class="leading-relaxed text-muted">
+      Suggested price:
+      {{ money(store.suggestedUnitPrice(selectedProductId), currency) }}. You
+      can override it below.
+    </p>
+    <div class="grid gap-3">
+      @for (line of draftLines(); track line.productId) {
+        <div
+          class="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-surface-muted p-3"
+        >
+          <span>{{ line.description }} × {{ line.quantity }}</span>
+          <app-form-field label="Unit price">
+            <input
+              class="max-w-24 rounded-lg border border-border bg-white px-3 py-2.5 text-ink"
+              [name]="'price-' + line.productId"
+              [ngModel]="line.unitPrice"
+              (ngModelChange)="updateLinePrice(line.productId, $event)"
+              type="number"
+              min="0"
+              step="0.01"
+            />
+          </app-form-field>
+          <app-button
+            type="button"
+            variant="danger"
+            (click)="removeLine(line.productId)"
+          >
+            Remove
+          </app-button>
+        </div>
+      }
+    </div>
+    <app-button
+      type="submit"
+      [disabled]="!canCreate()"
+    >
+      Create draft order
+    </app-button>
+  </form>
+</app-panel>

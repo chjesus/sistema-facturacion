@@ -1,0 +1,7 @@
+<app-button
+  class="block [&>button]:min-h-[2.8rem] [&>button]:w-full"
+  [disabled]="store.invoiceBalance(invoice) <= 0"
+  (click)="registerPayment()"
+>
+  Register payment
+</app-button>

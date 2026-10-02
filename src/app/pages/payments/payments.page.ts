@@ -28,6 +28,11 @@ import { CurrencyCode, InvoiceId, Payment, PaymentMethod } from '../../entities/
     } @else { <section class="panel"><h2>Invoice required</h2><p>Open Register Payment from a published or partial invoice with a positive balance.</p></section> }
   `,
   styles: [`
+    button { background: var(--accent); border: 0; border-radius: 8px; box-shadow: 0 1px 2px rgb(79 70 229 / .25); color: #fff; cursor: pointer; font: inherit; font-weight: 750; min-height: 2.7rem; padding: .7rem 1rem; }
+    button:hover:not(:disabled) { background: #4338ca; }
+    button:disabled { cursor: not-allowed; opacity: .45; }
+    button.secondary { background: var(--surface); border: 1px solid var(--border); box-shadow: none; color: #b42318; }
+  `, `
     .page-header,.invoice-card,.workspace { max-width: 960px; margin-inline: auto; } .eyebrow { color: var(--accent); font-size:.75rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; } h1 { font-size:clamp(2.2rem,6vw,4rem); letter-spacing:-.06em; margin:.5rem 0 1rem; } h2 { margin:0 0 1rem; } p { color:var(--muted); } .invoice-card,.panel { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:1.25rem; } .invoice-card { margin-top:2rem; } .workspace { display:grid; gap:1.25rem; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:1.25rem; } .form,.history { display:grid; gap:.85rem; } label { color:var(--muted); display:grid; font-size:.8rem; font-weight:700; gap:.35rem; } input,select { background:var(--surface); border:1px solid var(--border); border-radius:8px; color:inherit; font:inherit; padding:.7rem; } .preview { background:var(--surface-muted); border-radius:10px; display:grid; gap:.3rem; padding:1rem; } .preview span { color:var(--muted); font-size:.85rem; } .history article { border-top:1px solid var(--border); padding:.9rem 0; } .history article div { display:flex; justify-content:space-between; } .history p { font-size:.85rem; margin:.35rem 0; } .status { text-transform:capitalize; } .error { color:#b42318; } .secondary { margin-left:.5rem; } @media(max-width:760px){.workspace{grid-template-columns:1fr}}`],
 })
 export class PaymentsPage {

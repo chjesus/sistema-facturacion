@@ -14,6 +14,8 @@ export type SalesOrderStatus = 'draft' | 'confirmed' | 'completed' | 'cancelled'
 export type DeliveryStatus = 'pending' | 'validated' | 'cancelled';
 export type InvoiceStatus = 'draft' | 'published' | 'partial' | 'paid' | 'voided';
 export type PaymentStatus = 'draft' | 'confirmed' | 'voided';
+export type PaymentMethod = 'cash' | 'bank transfer' | 'mobile payment' | 'zelle';
+export type PaymentRateSource = 'history' | 'adjusted';
 
 export interface DocumentLine {
   productId: ProductId;
@@ -96,7 +98,15 @@ export interface Payment {
   status: PaymentStatus;
   currency: CurrencyCode;
   amount: number;
-  convertedAmount?: number;
+  paymentDate: string;
+  method: PaymentMethod;
+  rateSource: PaymentRateSource;
+  chosenRate: number;
+  rateDate: string;
+  invoiceRate: number;
+  invoiceRateDate: string;
+  convertedAmount: number;
+  /** Legacy aliases retained for existing persisted records. */
   frozenRate?: number;
   frozenRateDate?: string;
   confirmedAt?: string;

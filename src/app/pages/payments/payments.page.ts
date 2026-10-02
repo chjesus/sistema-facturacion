@@ -1,4 +1,5 @@
 import { Component, computed, inject, signal } from '@angular/core';
+import { ActivatedRoute } from '@angular/router';
 import { FormsModule } from '@angular/forms';
 import { LocalSalesCycleStore } from '../../entities/sales/api/local-sales-cycle-store.service';
 import { CurrencyCode, Invoice, InvoiceId, Payment } from '../../entities/sales/model/sales.models';
@@ -18,10 +19,11 @@ const pageStyles = `
 })
 export class PaymentsPage {
   protected readonly store = inject(LocalSalesCycleStore);
+  private readonly route = inject(ActivatedRoute);
   protected readonly selectedPaymentId = signal<string | undefined>(this.store.payments()[0]?.id);
   protected readonly selectedPayment = computed(() => this.store.payments().find((payment) => payment.id === this.selectedPaymentId()));
   protected readonly payableInvoices = computed(() => this.store.invoices().filter((invoice) => invoice.status === 'published' || invoice.status === 'partial'));
-  protected invoiceId = '';
+  protected invoiceId = this.preselectedInvoiceId();
   protected currency: CurrencyCode = 'USD';
   protected amount = 0;
 
@@ -41,4 +43,8 @@ export class PaymentsPage {
   protected invoiceFor(payment: Payment): Invoice | undefined { return this.store.invoices().find((invoice) => invoice.id === payment.invoiceId); }
   protected previewFor(payment: Payment) { const invoice = this.invoiceFor(payment); return invoice ? this.store.paymentPreview(invoice, payment.currency, payment.amount) : undefined; }
   protected money(amount: number, currency: CurrencyCode): string { return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount); }
+  private preselectedInvoiceId(): string {
+    const invoiceId = this.route.snapshot.queryParamMap.get('invoiceId') as InvoiceId | null;
+    return invoiceId && this.payableInvoices().some((invoice) => invoice.id === invoiceId && this.store.invoiceBalance(invoice) > 0) ? invoiceId : '';
+  }
 }

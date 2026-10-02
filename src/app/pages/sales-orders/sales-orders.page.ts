@@ -26,7 +26,7 @@ const pageStyles = `
     </section>
   `,
   styles: [pageStyles, `
-    .line-form { grid-template-columns: minmax(14rem, 1fr) minmax(7rem, .45fr) max-content; }
+    .line-form { grid-template-columns: minmax(0, 1fr) minmax(0, .45fr) max-content; }
     .line-form > label { min-width: 0; }
     .line-form > button { min-width: max-content; white-space: nowrap; }
     @media (max-width: 640px) { .line-form { grid-template-columns: 1fr; } .line-form > button { justify-self: start; } }

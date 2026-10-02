@@ -26,6 +26,9 @@ describe('PaymentsPage', () => {
 
     expect(fixture.nativeElement.textContent).toContain(store.invoices().find((candidate) => candidate.id === invoice.id)?.number);
     expect(fixture.nativeElement.querySelector('select[name="invoice"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-payment-workspace')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('app-register-payment')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('app-payment-history')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('input[name="paymentDate"]')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('input[name="reference"]')).not.toBeNull();
   });

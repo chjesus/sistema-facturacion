@@ -28,6 +28,7 @@ const pageStyles = `
   styles: [pageStyles, `
     .line-form { grid-template-columns: minmax(0, 1fr) minmax(0, .45fr) max-content; }
     .line-form > label { min-width: 0; }
+    .line-form input, .line-form select { box-sizing: border-box; min-width: 0; width: 100%; }
     .line-form > button { min-width: max-content; white-space: nowrap; }
     @media (max-width: 640px) { .line-form { grid-template-columns: 1fr; } .line-form > button { justify-self: start; } }
   `],
